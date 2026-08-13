@@ -67,8 +67,10 @@ function generate_userlist_if_needed() {
 function generate_config_db_entry() {
   printf "\
 ${DB_NAME:-*} = host=${DB_HOST:?"Setup pgbouncer config error! You must set DB_HOST env"} \
-port=${DB_PORT:-5432} auth_user=${DB_USER:-postgres}
-${CLIENT_ENCODING:+client_encoding = ${CLIENT_ENCODING}\n}\
+port=${DB_PORT:-5432} auth_user=${DB_USER:-postgres}\
+${CLIENT_ENCODING:+ client_encoding=${CLIENT_ENCODING}}\
+${TIMEZONE:+ timezone=${TIMEZONE}}\
+${POOL_SIZE:+ pool_size=${POOL_SIZE}}
 " >> "${PG_CONFIG_FILE}"
 }
 
@@ -123,7 +125,6 @@ ${AUTH_QUERY:+auth_query = ${AUTH_QUERY}\n}\
 ${AUTH_DBNAME:+auth_dbname = ${AUTH_DBNAME}\n}\
 ${POOL_MODE:+pool_mode = ${POOL_MODE}\n}\
 ${MAX_CLIENT_CONN:+max_client_conn = ${MAX_CLIENT_CONN}\n}\
-${POOL_SIZE:+pool_size = ${POOL_SIZE}\n}\
 ${DEFAULT_POOL_SIZE:+default_pool_size = ${DEFAULT_POOL_SIZE}\n}\
 ${MIN_POOL_SIZE:+min_pool_size = ${MIN_POOL_SIZE}\n}\
 ${RESERVE_POOL_SIZE:+reserve_pool_size = ${RESERVE_POOL_SIZE}\n}\
@@ -134,7 +135,6 @@ ${SERVER_ROUND_ROBIN:+server_round_robin = ${SERVER_ROUND_ROBIN}\n}\
 ignore_startup_parameters = ${IGNORE_STARTUP_PARAMETERS:-extra_float_digits}
 ${DISABLE_PQEXEC:+disable_pqexec = ${DISABLE_PQEXEC}\n}\
 ${APPLICATION_NAME_ADD_HOST:+application_name_add_host = ${APPLICATION_NAME_ADD_HOST}\n}\
-${TIMEZONE:+timezone = ${TIMEZONE}\n}\
 ${MAX_PREPARED_STATEMENTS:+max_prepared_statements = ${MAX_PREPARED_STATEMENTS}\n}\
 
 # Log settings

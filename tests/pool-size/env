@@ -1,4 +1,4 @@
 # boot: yes
 DB_HOST=db.example.com
 DB_NAME=appdb
-CLIENT_ENCODING=UTF8
+POOL_SIZE=30
