@@ -1,0 +1,4 @@
+# expect: failure
+# POOL_BASE_REPORTING_POOL_SIZE would belong to both names.
+DB_HOST=db.example.com
+POOLS=base,base_reporting

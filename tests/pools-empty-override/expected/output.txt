@@ -1,0 +1,2 @@
+Creating pgbouncer config in /etc/pgbouncer
+POOL_PAID_DBNAME is empty, unset it to inherit

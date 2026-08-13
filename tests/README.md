@@ -28,6 +28,11 @@ tests/<case>/expected/output.txt     for cases the entrypoint is meant to reject
   - asserts `SHOW CONFIG` and `SHOW DATABASES` off the running pooler, not the
     generated text, so a setting the entrypoint writes but pgbouncer ignores
     cannot pass
+  - `pool-effects.txt` records what a *session* sees rather than what the file
+    declares: the timezone and encoding a pool imposes, with an untouched pool
+    as the witness, and `SHOW POOLS` while a pool of one holds a transaction and
+    a second client waits. Drop the `pool_size` and that last one reads
+    `cl_waiting=0`, so it cannot pass vacuously
   - its expectations live in `tests/live/expected/`, and they move when the
     pinned pgbouncer version changes; that diff is the review signal for a bump
 
@@ -42,14 +47,26 @@ tests/run.sh
 tests/live.sh
 ```
 
-## Behaviours pinned as-is
+## Behaviours worth knowing
 
-- `CLIENT_ENCODING` renders `client_encoding = ...` inside `[databases]`, where
-  pgbouncer reads it as a database entry and refuses to load the file. Setting
-  that variable means the container never starts — see `client-encoding/env`.
-- `DATABASE_URLS` entries are parsed in one subshell, so `DB_PORT`, `DB_USER`,
-  `DB_PASSWORD` and `DB_NAME` carry over from the previous URL when the next one
-  omits them. In `database-urls-multiple/env` a port-less third URL inherits
-  `5433` from the second, while the same URL alone defaults to `5432`.
-- `[databases]` entries carry no `pool_size` and no `dbname`, so every pool
-  inherits `default_pool_size` and an alias must be a real database name.
+- `pools-*` cases cover `POOLS`: the rendered entries, an override of every
+  field including the host, and the two names it refuses. `live.sh` then serves
+  traffic through three pools onto one database and reads their sizes back from
+  `SHOW DATABASES`.
+- A pool's settings are sorted before they reach the line — `env` order is not
+  stable enough to compare against a file.
+- An empty override is refused by the entrypoint rather than passed on, because
+  pgbouncer's own reaction to one depends on where it lands:
+
+  ```
+  dbname= host=db.example.com port=5432   accepted
+  host=db.example.com dbname= port=5432   accepted
+  host=db.example.com port=5432 dbname=   syntax error in connection string
+  ```
+
+  Only a trailing empty value is a syntax error. Since the settings are sorted,
+  which mistake gets caught would depend on the alphabet — `POOL_X_TIMEZONE=`
+  sorts last and fails loudly, `POOL_X_AUTH_USER=` sorts first and starts fine,
+  then fails on the first query with an empty database name.
+- `missing-db-host/expected/output.txt` carries the line number the entrypoint
+  failed on, so it moves whenever lines are added above `generate_config_db_entry`.

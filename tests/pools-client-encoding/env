@@ -1,0 +1,9 @@
+# boot: yes
+# The global reaches every pool; one of them wants another encoding.
+DB_HOST=db.example.com
+DB_NAME=appdb
+CLIENT_ENCODING=UTF8
+POOLS=base,free
+POOL_BASE_POOL_SIZE=20
+POOL_FREE_POOL_SIZE=10
+POOL_FREE_CLIENT_ENCODING=LATIN1

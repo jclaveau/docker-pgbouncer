@@ -1,0 +1,5 @@
+base timezone=UTC
+free timezone=Europe/Paris
+base client_encoding=UTF8
+free client_encoding=LATIN1
+capped cl_active=1 cl_waiting=1 sv_active=1

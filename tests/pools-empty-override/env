@@ -1,0 +1,7 @@
+# expect: failure
+# pgbouncer rejects an empty value only when nothing follows it on the line, so
+# leaving this to it would catch POOL_PAID_TIMEZONE= but not POOL_PAID_AUTH_USER=.
+DB_HOST=db.example.com
+DB_NAME=appdb
+POOLS=base,paid
+POOL_PAID_DBNAME=

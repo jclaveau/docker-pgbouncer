@@ -1,0 +1,7 @@
+# boot: yes
+# A connect string value holding a space has to reach pgbouncer quoted.
+DB_HOST=db.example.com
+DB_NAME=appdb
+POOLS=base
+POOL_BASE_CONNECT_QUERY=SELECT 1
+POOL_BASE_DATESTYLE=ISO, MDY

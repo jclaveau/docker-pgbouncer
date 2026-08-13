@@ -72,6 +72,46 @@ docker run --rm \
     edoburu/pgbouncer
 ```
 
+Several pools over the same database
+------------------------------------
+
+`POOLS` declares one `[databases]` entry per name, each inheriting the settings
+above and overriding what it needs through `POOL_<NAME>_<SETTING>`. PgBouncer
+keeps a pool per entry, and clients pick an entry by the database name they
+connect to, so one database can be served by several pools of different sizes:
+
+```sh
+docker run --rm \
+    -e DATABASE_URL="postgres://user:pass@postgres-host/database" \
+    -e POOLS=base,paid,free \
+    -e POOL_BASE_POOL_SIZE=20 \
+    -e POOL_PAID_POOL_SIZE=34 \
+    -e POOL_FREE_POOL_SIZE=10 \
+    -p 5432:5432 \
+    edoburu/pgbouncer
+```
+
+An application connecting to `…/free` reaches `database` through a pool
+capped at 10 server connections, without competing with the other two. Any
+[connect string parameter](https://pgbouncer.github.io/config.html#section-databases)
+works as a setting, so a pool may also point somewhere else entirely:
+
+```sh
+    -e POOL_REPLICA_HOST=replica-host \
+    -e POOL_REPLICA_DBNAME=database \
+    -e POOL_REPLICA_POOL_MODE=session
+```
+
+Names take letters, digits and underscores, must be unique, and none may be the
+prefix of another, since `POOL_BASE_REPORTING_POOL_SIZE` would otherwise belong
+to both `base` and `base_reporting`. Names differing only in case collide the
+same way. Any of these is refused at startup rather than quietly misread.
+
+`POOLS` replaces the entries `DATABASE_URL` and `DATABASE_URLS` would have
+generated. `DATABASE_URL` still provides the defaults a pool does not override;
+`DATABASE_URLS` only fills `userlist.txt`, so with it every pool needs a host of
+its own or a `DB_HOST` to inherit.
+
 Kubernetes integration
 ----------------------
 

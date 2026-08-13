@@ -13,11 +13,13 @@ expected_dir="$tests_dir/live/expected"
 network=pgbouncer-live-test
 postgres_container=pgbouncer-live-postgres
 pooler_container=pgbouncer-live-pooler
+pools_container=pgbouncer-live-pools
 
 work_dir=$(mktemp -d)
 
 teardown() {
-  docker rm -f "$pooler_container" "$postgres_container" > /dev/null 2>&1 || true
+  docker rm -f "$pools_container" "$pooler_container" "$postgres_container" \
+    > /dev/null 2>&1 || true
   docker network rm "$network" > /dev/null 2>&1 || true
 }
 
@@ -98,9 +100,94 @@ query_through_pooler pgbouncer "SHOW DATABASES" \
   | awk -F'|' '{ print $1 "|" $3 "|" $6 }' \
   | sort > "$work_dir/show-databases.txt"
 
+docker run -d --name "$pools_container" --network "$network" \
+  --env "DATABASE_URL=postgres://appuser:s3cret@$postgres_container:5432/appdb" \
+  --env AUTH_TYPE=scram-sha-256 \
+  --env POOL_MODE=transaction \
+  --env LISTEN_ADDR='*' \
+  --env LISTEN_PORT=6432 \
+  --env SERVER_TLS_SSLMODE=disable \
+  --env ADMIN_USERS=appuser \
+  --env POOLS=base,paid,free,capped \
+  --env POOL_BASE_POOL_SIZE=20 \
+  --env POOL_PAID_POOL_SIZE=34 \
+  --env POOL_FREE_POOL_SIZE=10 \
+  --env POOL_FREE_TIMEZONE=Europe/Paris \
+  --env POOL_FREE_CLIENT_ENCODING=LATIN1 \
+  --env POOL_CAPPED_POOL_SIZE=1 \
+  "$image" > /dev/null
+
+deadline=$((SECONDS + 60))
+
+until docker logs "$pools_container" 2>&1 | grep -q "process up:"; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "the pooled pgbouncer never started:"
+    docker logs "$pools_container" 2>&1 | awk '{ print "  " $0 }'
+    exit 1
+  fi
+
+  sleep 1
+done
+
+# Every tier must reach the one real database, each through its own pool.
+for pool in base paid free; do
+  pooled_database=$(
+    docker exec --env PGPASSWORD=s3cret "$pools_container" \
+      psql "postgres://appuser@127.0.0.1:6432/$pool" -tAX -c "select current_database()"
+  )
+
+  if [ "$pooled_database" != "appdb" ]; then
+    echo "expected pool $pool to reach appdb, got '$pooled_database'"
+    exit 1
+  fi
+done
+
+docker exec --env PGPASSWORD=s3cret "$pools_container" \
+  psql "postgres://appuser@127.0.0.1:6432/pgbouncer" -tAX -c "SHOW DATABASES" \
+  | awk -F'|' '{ print $1 "|" $3 "|" $6 }' \
+  | sort > "$work_dir/show-databases-pools.txt"
+
+query_pool() {
+  docker exec --env PGPASSWORD=s3cret "$pools_container" \
+    psql "postgres://appuser@127.0.0.1:6432/$1" -tAX -c "$2"
+}
+
+# A setting on a pool has to reach the session, not merely parse. base is the
+# witness: same server, no overrides.
+{
+  printf 'base timezone=%s\n' "$(query_pool base "select current_setting('TimeZone')")"
+  printf 'free timezone=%s\n' "$(query_pool free "select current_setting('TimeZone')")"
+  printf 'base client_encoding=%s\n' "$(query_pool base 'show client_encoding')"
+  printf 'free client_encoding=%s\n' "$(query_pool free 'show client_encoding')"
+} > "$work_dir/pool-effects.txt"
+
+# pool_size has to cap: hold one transaction on a pool of one, and a second
+# client must queue instead of opening a second server connection.
+for _ in 1 2; do
+  docker exec --detach --env PGPASSWORD=s3cret "$pools_container" \
+    psql "postgres://appuser@127.0.0.1:6432/capped" -tAX \
+    -c "begin; select pg_sleep(20); commit;" > /dev/null
+done
+
+deadline=$((SECONDS + 30))
+
+until [ "$(query_pool pgbouncer "SHOW POOLS" | awk -F'|' '$1 == "capped" { print $4 }')" = "1" ]; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "no client ever queued on a pool of one, so pool_size did not cap:"
+    query_pool pgbouncer "SHOW POOLS" | awk -F'|' '$1 == "capped"' | awk '{ print "  " $0 }'
+    exit 1
+  fi
+
+  sleep 1
+done
+
+query_pool pgbouncer "SHOW POOLS" \
+  | awk -F'|' '$1 == "capped" { print "capped cl_active=" $3 " cl_waiting=" $4 " sv_active=" $7 }' \
+  >> "$work_dir/pool-effects.txt"
+
 status=0
 
-for artifact in show-config.txt show-databases.txt; do
+for artifact in show-config.txt show-databases.txt show-databases-pools.txt pool-effects.txt; do
   if [ "$update_expected" = "1" ]; then
     mkdir -p "$expected_dir"
     cp "$work_dir/$artifact" "$expected_dir/$artifact"

@@ -88,6 +88,131 @@ ${POOL_SIZE:+ pool_size=${POOL_SIZE}}
 " >> "${PG_CONFIG_FILE}"
 }
 
+# The env prefix a pool's overrides live under, e.g. paid -> POOL_PAID_
+function pool_env_prefix() {
+  printf "POOL_%s_" "$(echo "$1" | tr 'a-z' 'A-Z')"
+}
+
+# One override, empty when the pool does not set it.
+function pool_setting() {
+  env | awk -F= -v key="$1$2" '$1 == key { print substr($0, length(key) + 2); exit }'
+}
+
+# The connect string of a pool: the inherited defaults, then its own overrides,
+# the last value of a key winning. pgbouncer refuses a parameter it knows not.
+function pool_connect_string() {
+  pool_prefix="$1"
+  pool_name="$2"
+
+  {
+    printf 'host=%s\n' "${DB_HOST}"
+    printf 'port=%s\n' "${DB_PORT:-5432}"
+    printf 'dbname=%s\n' "${DB_NAME:-$pool_name}"
+    printf 'auth_user=%s\n' "${DB_USER:-postgres}"
+
+    # pgbouncer has no process-wide setting for these three.
+    if [ -n "${CLIENT_ENCODING}" ]; then
+      printf 'client_encoding=%s\n' "${CLIENT_ENCODING}"
+    fi
+
+    if [ -n "${TIMEZONE}" ]; then
+      printf 'timezone=%s\n' "${TIMEZONE}"
+    fi
+
+    if [ -n "${POOL_SIZE}" ]; then
+      printf 'pool_size=%s\n' "${POOL_SIZE}"
+    fi
+
+    env | awk -F= -v prefix="$pool_prefix" '
+      index($0, prefix) == 1 {
+        print tolower(substr($1, length(prefix) + 1)) "=" substr($0, length($1) + 2)
+      }'
+  } \
+    | awk -F= '{ key = $1; value = substr($0, length(key) + 2); last[key] = value }
+               END { for (key in last) print key "=" last[key] }' \
+    | sort \
+    | awk -F= '
+        {
+          key = $1
+          value = substr($0, length(key) + 2)
+
+          # A value with a space needs quoting, and a quote inside it doubling.
+          if (value ~ /[[:space:]]/) {
+            gsub(/'"'"'/, "'"'"''"'"'", value)
+            value = "'"'"'" value "'"'"'"
+          }
+
+          printf " %s=%s", key, value
+        }'
+}
+
+# A name reaching its overrides through an env prefix cannot contain anything an
+# env name cannot, nor be the prefix of another name.
+function assert_pool_names_are_usable() {
+  seen_names=""
+
+  for name in $(echo "${POOLS}" | tr , ' '); do
+    if ! echo "$name" | grep -qE '^[A-Za-z0-9_]+$'; then
+      echo "Pool name \"$name\" is not usable: POOLS takes letters, digits and underscores" >&2
+      exit 1
+    fi
+
+    case " ${seen_names} " in
+      *" $name "*)
+        echo "Pool name \"$name\" appears twice in POOLS" >&2
+        exit 1
+        ;;
+    esac
+
+    seen_names="${seen_names} $name"
+
+    for other in $(echo "${POOLS}" | tr , ' '); do
+      if [ "$name" = "$other" ]; then
+        continue
+      fi
+
+      case "$(pool_env_prefix "$other")" in
+        "$(pool_env_prefix "$name")"*)
+          echo "Pool names \"$name\" and \"$other\" overlap: the overrides of one would be read as the other's" >&2
+          exit 1
+          ;;
+      esac
+    done
+  done
+}
+
+# An override carries a setting name and a value; empty means a reference that
+# resolved to nothing, never an instruction to blank an inherited setting.
+function unusable_pool_overrides() {
+  for name in $(echo "${POOLS}" | tr , ' '); do
+    env | awk -F= -v prefix="$(pool_env_prefix "$name")" '
+      index($0, prefix) == 1 {
+        key = substr($1, length(prefix) + 1)
+
+        if (key == "") {
+          print $1 " names no setting"
+        }
+        else if (substr($0, length($1) + 2) == "") {
+          print $1 " is empty, unset it to inherit"
+        }
+      }'
+  done
+}
+
+# One [databases] entry per pool, each inheriting what it does not override.
+function generate_pool_entries() {
+  for name in $(echo "${POOLS}" | tr , ' '); do
+    prefix="$(pool_env_prefix "$name")"
+
+    # Fail here rather than hand pgbouncer an entry with an empty host.
+    pool_host="$(pool_setting "$prefix" HOST)"
+    : "${pool_host:-${DB_HOST:?"Setup pgbouncer config error! Pool \"$name\" has no host, set ${prefix}HOST or DB_HOST"}}"
+
+    printf "%s =%s\n" "$name" "$(pool_connect_string "$prefix" "$name")" \
+      >> "${PG_CONFIG_FILE}"
+  done
+}
+
 # Write the password with MD5 encryption, to avoid printing it during startup.
 # Notice that `docker inspect` will show unencrypted env variables.
 if [ -n "${DATABASE_URLS}" ]; then
@@ -113,15 +238,26 @@ if [ ! -f "${PG_CONFIG_FILE}" ]; then
 [databases]
 " > "${PG_CONFIG_FILE}"
 
-  if [ -n "$DATABASE_URLS" ]; then
+  if [ -n "$DATABASE_URL" ]; then
+    parse_url "$DATABASE_URL"
+  fi
+
+  if [ -n "$POOLS" ]; then
+    assert_pool_names_are_usable
+    unusable_overrides="$(unusable_pool_overrides)"
+
+    if [ -n "$unusable_overrides" ]; then
+      echo "$unusable_overrides" >&2
+      exit 1
+    fi
+
+    generate_pool_entries
+  elif [ -n "$DATABASE_URLS" ]; then
     echo "$DATABASE_URLS" | tr , '\n' | while read url; do
       parse_url "$url"
       generate_config_db_entry
     done
   else
-    if [ -n "$DATABASE_URL" ]; then
-      parse_url "$DATABASE_URL"
-    fi
     generate_config_db_entry
   fi
 

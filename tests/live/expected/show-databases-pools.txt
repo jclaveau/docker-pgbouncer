@@ -1,0 +1,5 @@
+base|5432|20
+capped|5432|1
+free|5432|10
+paid|5432|34
+pgbouncer|6432|2

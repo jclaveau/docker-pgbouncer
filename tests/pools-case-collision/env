@@ -1,0 +1,4 @@
+# expect: failure
+# Both reach their overrides through POOL_BASE_.
+DB_HOST=db.example.com
+POOLS=Base,base
