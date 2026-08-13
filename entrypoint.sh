@@ -10,6 +10,13 @@ PG_CONFIG_DIR=/etc/pgbouncer
 PG_CONFIG_FILE="${PG_CONFIG_DIR}/pgbouncer.ini"
 _AUTH_FILE="${AUTH_FILE:-$PG_CONFIG_DIR/userlist.txt}"
 
+# What the environment provided, before any URL overwrites it.
+ENV_DB_USER="${DB_USER:-}"
+ENV_DB_PASSWORD="${DB_PASSWORD:-}"
+ENV_DB_HOST="${DB_HOST:-}"
+ENV_DB_PORT="${DB_PORT:-}"
+ENV_DB_NAME="${DB_NAME:-}"
+
 # Workaround userlist.txt missing issue
 # https://github.com/edoburu/docker-pgbouncer/issues/33
 if [ ! -e "${_AUTH_FILE}" ]; then
@@ -22,6 +29,13 @@ fi
 #   - The url we should parse
 # Returns (sets variables): DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME
 function parse_url() {
+  # Reset first: DATABASE_URLS parses all its entries in one subshell.
+  DB_USER="${ENV_DB_USER}"
+  DB_PASSWORD="${ENV_DB_PASSWORD}"
+  DB_HOST="${ENV_DB_HOST}"
+  DB_PORT="${ENV_DB_PORT}"
+  DB_NAME="${ENV_DB_NAME}"
+
   # Thanks to https://stackoverflow.com/a/17287984/146289
 
   # Allow to pass values like dj-database-url / django-environ accept

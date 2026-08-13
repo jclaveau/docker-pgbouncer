@@ -7,7 +7,8 @@ tests_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 entrypoint="$tests_dir/../entrypoint.sh"
 
 # Set by the script itself, so not part of the container's interface.
-internal_variables="PG_CONFIG_DIR PG_CONFIG_FILE _AUTH_FILE"
+internal_variables="PG_CONFIG_DIR PG_CONFIG_FILE _AUTH_FILE
+ENV_DB_USER ENV_DB_PASSWORD ENV_DB_HOST ENV_DB_PORT ENV_DB_NAME"
 
 referenced=$(
   grep -oE '\$\{?[A-Z_][A-Z0-9_]*' "$entrypoint" \
