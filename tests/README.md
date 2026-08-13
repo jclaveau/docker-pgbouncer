@@ -32,7 +32,8 @@ tests/<case>/expected/output.txt     for cases the entrypoint is meant to reject
     pinned pgbouncer version changes; that diff is the review signal for a bump
 
 `run.sh` and `live.sh` take `IMAGE` (default `edoburu/pgbouncer:test`) and
-`UPDATE_EXPECTED=1`.
+`UPDATE_EXPECTED=1`. `live.sh` also takes `POSTGRES_IMAGE`, which CI runs over
+the two latest majors; both produce the same expectations.
 
 ```bash
 make docker-x86 IMAGE_VERSION=test
