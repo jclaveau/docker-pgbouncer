@@ -1,0 +1,1 @@
+DATABASE_URLS cannot be combined with POOLS or USERS: name the entries in POOLS and the credentials in USERS

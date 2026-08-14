@@ -34,6 +34,10 @@ docker run -d --name "$postgres_container" --network "$network" \
   --env POSTGRES_DB=appdb \
   "$postgres_image" > /dev/null
 
+extra_roles_sql="create role reporting login password 'r3port';
+create role readonly login password 'r3ad0nly';
+create role mismatched login password 'the-server-one'"
+
 deadline=$((SECONDS + 60))
 
 until docker exec "$postgres_container" pg_isready -U appuser -d appdb > /dev/null 2>&1; do
@@ -108,13 +112,19 @@ docker run -d --name "$pools_container" --network "$network" \
   --env LISTEN_PORT=6432 \
   --env SERVER_TLS_SSLMODE=disable \
   --env ADMIN_USERS=appuser \
-  --env POOLS=base,paid,free,capped \
+  --env POOLS=base,paid,free,capped,forced \
   --env POOL_BASE_POOL_SIZE=20 \
   --env POOL_PAID_POOL_SIZE=34 \
   --env POOL_FREE_POOL_SIZE=10 \
   --env POOL_FREE_TIMEZONE=Europe/Paris \
   --env POOL_FREE_CLIENT_ENCODING=LATIN1 \
   --env POOL_CAPPED_POOL_SIZE=1 \
+  --env USERS=reporting,ghost,mismatched \
+  --env USER_REPORTING_PASSWORD=r3port \
+  --env USER_GHOST_PASSWORD=gh0st \
+  --env USER_MISMATCHED_PASSWORD=the-pooler-one \
+  --env POOL_FORCED_USER=readonly \
+  --env POOL_FORCED_PASSWORD=r3ad0nly \
   "$image" > /dev/null
 
 deadline=$((SECONDS + 60))
@@ -152,6 +162,20 @@ query_pool() {
     psql "postgres://appuser@127.0.0.1:6432/$1" -tAX -c "$2"
 }
 
+# A credential named in USERS has to authenticate, not merely reach userlist.txt.
+docker exec --env PGPASSWORD=s3cret "$postgres_container" \
+  psql "postgres://appuser@127.0.0.1:5432/appdb" -tAX -c "$extra_roles_sql" > /dev/null
+
+second_user=$(
+  docker exec --env PGPASSWORD=r3port "$pools_container" \
+    psql "postgres://reporting@127.0.0.1:6432/base" -tAX -c "select current_user"
+)
+
+if [ "$second_user" != "reporting" ]; then
+  echo "expected the USERS credential to authenticate, got '$second_user'"
+  exit 1
+fi
+
 # A setting on a pool has to reach the session, not merely parse. base is the
 # witness: same server, no overrides.
 {
@@ -159,7 +183,55 @@ query_pool() {
   printf 'free timezone=%s\n' "$(query_pool free "select current_setting('TimeZone')")"
   printf 'base client_encoding=%s\n' "$(query_pool base 'show client_encoding')"
   printf 'free client_encoding=%s\n' "$(query_pool free 'show client_encoding')"
+
+  # A pool given its own user reaches the server as that role, and the pools that
+  # were given none still carry the client's own identity.
+  printf 'base server_user=%s\n' "$(query_pool base 'select current_user')"
+  printf 'forced server_user=%s\n' "$(query_pool forced 'select current_user')"
 } > "$work_dir/pool-effects.txt"
+
+# ghost is in userlist.txt and nowhere in postgres. It can only reach a pool that
+# forces a user, since otherwise pgbouncer connects onward as ghost itself.
+ghost_on_plain=$(
+  docker exec --env PGPASSWORD=gh0st "$pools_container" \
+    psql "postgres://ghost@127.0.0.1:6432/base" -tAX -c "select current_user" 2>&1 \
+    | tail -1 || true # psql is meant to fail here, the message is the assertion
+)
+
+case "$ghost_on_plain" in
+  *'authentication failed for user "ghost"'*) ;;
+  *)
+    echo "expected a credential with no server role to be refused, got '$ghost_on_plain'"
+    exit 1
+    ;;
+esac
+
+ghost_on_forced=$(
+  docker exec --env PGPASSWORD=gh0st "$pools_container" \
+    psql "postgres://ghost@127.0.0.1:6432/forced" -tAX -c "select current_user"
+)
+
+if [ "$ghost_on_forced" != "readonly" ]; then
+  echo "expected the forced pool to carry ghost as readonly, got '$ghost_on_forced'"
+  exit 1
+fi
+
+# mismatched exists on both sides under different passwords. The pooler accepts
+# the one it holds, then presents it onward, and the server refuses it.
+mismatched_login=$(
+  docker exec --env PGPASSWORD=the-pooler-one "$pools_container" \
+    psql "postgres://mismatched@127.0.0.1:6432/base" -tAX -c "select current_user" 2>&1 \
+    | tail -1 || true # psql is meant to fail here, the message is the assertion
+)
+
+case "$mismatched_login" in
+  *'authentication failed for user "mismatched"'*) ;;
+  *)
+    echo "expected a userlist password disagreeing with the server's to be refused,"
+    echo "got '$mismatched_login'"
+    exit 1
+    ;;
+esac
 
 # pool_size has to cap: hold one transaction on a pool of one, and a second
 # client must queue instead of opening a second server connection.

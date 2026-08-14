@@ -29,10 +29,14 @@ tests/<case>/expected/output.txt     for cases the entrypoint is meant to reject
     generated text, so a setting the entrypoint writes but pgbouncer ignores
     cannot pass
   - `pool-effects.txt` records what a *session* sees rather than what the file
-    declares: the timezone and encoding a pool imposes, with an untouched pool
-    as the witness, and `SHOW POOLS` while a pool of one holds a transaction and
-    a second client waits. Drop the `pool_size` and that last one reads
-    `cl_waiting=0`, so it cannot pass vacuously
+    declares:
+    - the timezone and encoding a pool imposes, against an untouched pool as the
+      witness
+    - the role the session lands on: a pool given `POOL_<NAME>_USER` reaches the
+      server as that role, one given none still carries the client's own
+    - `SHOW POOLS` while a pool of one holds a transaction and a second client
+      waits. Drop that `pool_size` and it reads `cl_waiting=0`, so the assertion
+      cannot pass vacuously
   - its expectations live in `tests/live/expected/`, and they move when the
     pinned pgbouncer version changes; that diff is the review signal for a bump
 
@@ -68,5 +72,24 @@ tests/live.sh
   which mistake gets caught would depend on the alphabet — `POOL_X_TIMEZONE=`
   sorts last and fails loudly, `POOL_X_AUTH_USER=` sorts first and starts fine,
   then fails on the first query with an empty database name.
+- A `userlist.txt` credential is reused for the onward login, so it only works in
+  two shapes, both asserted in `live.sh`:
+  - the password equals the role's on the server — pgbouncer verifies the client
+    with it, then presents it onward. Disagreeing passwords authenticate at the
+    pooler and are then refused by the server (`mismatched`)
+  - or the pool carries `POOL_<NAME>_USER`, which supplies the server identity,
+    so the credential needs no role at all (`ghost`)
+- An empty `USER_<NAME>_PASSWORD` is refused for a different reason: Postgres has
+  no such thing as an empty password.
+
+  ```console
+  postgres=# create role emptypw login password '';
+  NOTICE:  empty string is not a valid password, clearing password
+  CREATE ROLE
+  ```
+
+  The role ends up with `rolpassword` NULL, which no `md5` or `scram-sha-256`
+  exchange can satisfy. A `userlist.txt` line built from one would be a
+  credential that fails every login, quietly, at runtime.
 - `missing-db-host/expected/output.txt` carries the line number the entrypoint
   failed on, so it moves whenever lines are added above `generate_config_db_entry`.

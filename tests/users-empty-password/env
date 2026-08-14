@@ -1,0 +1,7 @@
+# expect: failure
+# Postgres answers "empty string is not a valid password, clearing password" and
+# stores NULL, so an entry built from one could never authenticate.
+DB_HOST=db.example.com
+DB_NAME=appdb
+USERS=app
+USER_APP_PASSWORD=

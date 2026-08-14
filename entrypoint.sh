@@ -67,7 +67,9 @@ function parse_url() {
 # Grabs variables set by `parse_url` and adds them to the userlist if not already set in there.
 function generate_userlist_if_needed() {
   if [ -n "${DB_USER}" -a -n "${DB_PASSWORD}" -a -e "${_AUTH_FILE}" ] && ! grep -q "^\"${DB_USER}\"" "${_AUTH_FILE}"; then
-    if [ "${AUTH_TYPE}" == "plain" ] || [ "${AUTH_TYPE}" == "scram-sha-256" ]; then
+    if echo "${DB_PASSWORD}" | grep -qE '^(md5[0-9a-f]{32}|SCRAM-SHA-256\$)'; then
+      pass="${DB_PASSWORD}" # already a verifier, hashing it again would break login
+    elif [ "${AUTH_TYPE}" == "plain" ] || [ "${AUTH_TYPE}" == "scram-sha-256" ]; then
       pass="${DB_PASSWORD}"
     else
       pass="md5$(echo -n "${DB_PASSWORD}${DB_USER}" | md5sum | cut -f 1 -d ' ')"
@@ -79,6 +81,8 @@ function generate_userlist_if_needed() {
 
 # Grabs variables set by `parse_url` and adds them to the PG config file as a database entry.
 function generate_config_db_entry() {
+  # auth_user falls back to postgres even when nothing here holds its password:
+  # a mounted userlist may, and dropping it takes auth_query from those setups.
   printf "\
 ${DB_NAME:-*} = host=${DB_HOST:?"Setup pgbouncer config error! You must set DB_HOST env"} \
 port=${DB_PORT:-5432} auth_user=${DB_USER:-postgres}\
@@ -88,13 +92,13 @@ ${POOL_SIZE:+ pool_size=${POOL_SIZE}}
 " >> "${PG_CONFIG_FILE}"
 }
 
-# The env prefix a pool's overrides live under, e.g. paid -> POOL_PAID_
-function pool_env_prefix() {
-  printf "POOL_%s_" "$(echo "$1" | tr 'a-z' 'A-Z')"
+# The env prefix a name's settings live under, e.g. POOL + paid -> POOL_PAID_
+function name_env_prefix() {
+  printf "%s_%s_" "$1" "$(echo "$2" | tr 'a-z' 'A-Z')"
 }
 
-# One override, empty when the pool does not set it.
-function pool_setting() {
+# One setting, empty when it is not set.
+function env_setting() {
   env | awk -F= -v key="$1$2" '$1 == key { print substr($0, length(key) + 2); exit }'
 }
 
@@ -108,7 +112,7 @@ function pool_connect_string() {
     printf 'host=%s\n' "${DB_HOST}"
     printf 'port=%s\n' "${DB_PORT:-5432}"
     printf 'dbname=%s\n' "${DB_NAME:-$pool_name}"
-    printf 'auth_user=%s\n' "${DB_USER:-postgres}"
+    printf 'auth_user=%s\n' "${DB_USER:-postgres}" # a mounted userlist may hold it
 
     # pgbouncer has no process-wide setting for these three.
     if [ -n "${CLIENT_ENCODING}" ]; then
@@ -146,34 +150,37 @@ function pool_connect_string() {
         }'
 }
 
-# A name reaching its overrides through an env prefix cannot contain anything an
+# A name reaching its settings through an env prefix cannot contain anything an
 # env name cannot, nor be the prefix of another name.
-function assert_pool_names_are_usable() {
+function assert_names_are_usable() {
+  env_root="$1"
+  kind="$2"
+  names="$3"
   seen_names=""
 
-  for name in $(echo "${POOLS}" | tr , ' '); do
+  for name in $(echo "$names" | tr , ' '); do
     if ! echo "$name" | grep -qE '^[A-Za-z0-9_]+$'; then
-      echo "Pool name \"$name\" is not usable: POOLS takes letters, digits and underscores" >&2
+      echo "$kind name \"$name\" is not usable: ${env_root}S takes letters, digits and underscores" >&2
       exit 1
     fi
 
     case " ${seen_names} " in
       *" $name "*)
-        echo "Pool name \"$name\" appears twice in POOLS" >&2
+        echo "$kind name \"$name\" appears twice in ${env_root}S" >&2
         exit 1
         ;;
     esac
 
     seen_names="${seen_names} $name"
 
-    for other in $(echo "${POOLS}" | tr , ' '); do
+    for other in $(echo "$names" | tr , ' '); do
       if [ "$name" = "$other" ]; then
         continue
       fi
 
-      case "$(pool_env_prefix "$other")" in
-        "$(pool_env_prefix "$name")"*)
-          echo "Pool names \"$name\" and \"$other\" overlap: the overrides of one would be read as the other's" >&2
+      case "$(name_env_prefix "$env_root" "$other")" in
+        "$(name_env_prefix "$env_root" "$name")"*)
+          echo "$kind names \"$name\" and \"$other\" overlap: the settings of one would be read as the other's" >&2
           exit 1
           ;;
       esac
@@ -181,11 +188,11 @@ function assert_pool_names_are_usable() {
   done
 }
 
-# An override carries a setting name and a value; empty means a reference that
-# resolved to nothing, never an instruction to blank an inherited setting.
-function unusable_pool_overrides() {
-  for name in $(echo "${POOLS}" | tr , ' '); do
-    env | awk -F= -v prefix="$(pool_env_prefix "$name")" '
+# A setting carries a name and a value; empty means a reference that resolved to
+# nothing, never an instruction to blank an inherited value.
+function unusable_settings() {
+  for name in $(echo "$2" | tr , ' '); do
+    env | awk -F= -v prefix="$(name_env_prefix "$1" "$name")" -v hint="$3" '
       index($0, prefix) == 1 {
         key = substr($1, length(prefix) + 1)
 
@@ -193,25 +200,68 @@ function unusable_pool_overrides() {
           print $1 " names no setting"
         }
         else if (substr($0, length($1) + 2) == "") {
-          print $1 " is empty, unset it to inherit"
+          print $1 " is empty, " hint
         }
       }'
   done
 }
 
+# One userlist entry per USERS name, the label standing in for the username when
+# the database spells it in a way an env name cannot.
+function generate_userlist_from_users() {
+  # The writer reads the globals, so put back what the connection settings say
+  # once the last credential is written.
+  connection_user="${DB_USER}"
+  connection_password="${DB_PASSWORD}"
+
+  for name in $(echo "${USERS}" | tr , ' '); do
+    prefix="$(name_env_prefix USER "$name")"
+    DB_USER="$(env_setting "$prefix" NAME)"
+    DB_USER="${DB_USER:-$name}"
+    DB_PASSWORD="$(env_setting "$prefix" PASSWORD)"
+
+    if [ -z "${DB_PASSWORD}" ]; then
+      echo "User \"$name\" has no password, set ${prefix}PASSWORD" >&2
+      exit 1
+    fi
+
+    generate_userlist_if_needed
+  done
+
+  DB_USER="${connection_user}"
+  DB_PASSWORD="${connection_password}"
+}
+
 # One [databases] entry per pool, each inheriting what it does not override.
 function generate_pool_entries() {
   for name in $(echo "${POOLS}" | tr , ' '); do
-    prefix="$(pool_env_prefix "$name")"
+    prefix="$(name_env_prefix POOL "$name")"
 
     # Fail here rather than hand pgbouncer an entry with an empty host.
-    pool_host="$(pool_setting "$prefix" HOST)"
+    pool_host="$(env_setting "$prefix" HOST)"
     : "${pool_host:-${DB_HOST:?"Setup pgbouncer config error! Pool \"$name\" has no host, set ${prefix}HOST or DB_HOST"}}"
 
     printf "%s =%s\n" "$name" "$(pool_connect_string "$prefix" "$name")" \
       >> "${PG_CONFIG_FILE}"
   done
 }
+
+# DATABASE_URLS spells topology and credentials in one value; POOLS and USERS
+# split them, and mixing the two spellings has no single reading.
+if [ -n "${DATABASE_URLS}" ] && [ -n "${POOLS}${USERS}" ]; then
+  echo "DATABASE_URLS cannot be combined with POOLS or USERS: name the entries in POOLS and the credentials in USERS" >&2
+  exit 1
+fi
+
+if [ -n "${USERS}" ]; then
+  assert_names_are_usable USER User "${USERS}"
+  unusable_user_settings="$(unusable_settings USER "${USERS}" "give it a value or drop the name from USERS")"
+
+  if [ -n "$unusable_user_settings" ]; then
+    echo "$unusable_user_settings" >&2
+    exit 1
+  fi
+fi
 
 # Write the password with MD5 encryption, to avoid printing it during startup.
 # Notice that `docker inspect` will show unencrypted env variables.
@@ -225,6 +275,10 @@ else
     parse_url "${DATABASE_URL}"
   fi
   generate_userlist_if_needed
+fi
+
+if [ -n "${USERS}" ]; then
+  generate_userlist_from_users
 fi
 
 if [ ! -f "${PG_CONFIG_FILE}" ]; then
@@ -243,8 +297,8 @@ if [ ! -f "${PG_CONFIG_FILE}" ]; then
   fi
 
   if [ -n "$POOLS" ]; then
-    assert_pool_names_are_usable
-    unusable_overrides="$(unusable_pool_overrides)"
+    assert_names_are_usable POOL Pool "${POOLS}"
+    unusable_overrides="$(unusable_settings POOL "${POOLS}" "unset it to inherit")"
 
     if [ -n "$unusable_overrides" ]; then
       echo "$unusable_overrides" >&2

@@ -1,6 +1,6 @@
-# boot: yes
-# DATABASE_URLS feeds the userlist only; the entries come from POOLS, and the
-# defaults from DB_*, so a pool needs its own host or DB_HOST.
+# expect: failure
+# DATABASE_URLS spells topology and credentials at once; POOLS and USERS split
+# them, so the two spellings have no single reading.
 DATABASE_URLS=postgres://appuser:s3cret@db1.example.com:5432/first,postgres://otheruser:0ther@db2.example.com:5432/second
 DB_HOST=db.example.com
 DB_NAME=appdb

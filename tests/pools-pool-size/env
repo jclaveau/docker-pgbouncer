@@ -1,5 +1,7 @@
 # boot: yes
 # The global sizes both pools; the free one is capped tighter.
+# The rendered auth_user=postgres is a default, not something configured here:
+# it can only authenticate when a mounted userlist holds that credential.
 DB_HOST=db.example.com
 DB_NAME=appdb
 POOL_SIZE=20

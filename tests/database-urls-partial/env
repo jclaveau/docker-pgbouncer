@@ -1,3 +1,5 @@
 # boot: yes
 # The second URL carries no credentials and must not borrow the first one's.
+# The rendered auth_user=postgres is a default, not something configured here:
+# it can only authenticate when a mounted userlist holds that credential.
 DATABASE_URLS=postgres://appuser:s3cret@db1.example.com:6543/first,postgres://db2.example.com/second

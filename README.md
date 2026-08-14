@@ -72,45 +72,135 @@ docker run --rm \
     edoburu/pgbouncer
 ```
 
-Several pools over the same database
-------------------------------------
+Multiple pools and users
+------------------------
 
-`POOLS` declares one `[databases]` entry per name, each inheriting the settings
-above and overriding what it needs through `POOL_<NAME>_<SETTING>`. PgBouncer
-keeps a pool per entry, and clients pick an entry by the database name they
-connect to, so one database can be served by several pools of different sizes:
+One PgBouncer can serve the same database through several pools, each with its own
+size and its own identity, and hold credentials for several clients.
 
-```sh
-docker run --rm \
-    -e DATABASE_URL="postgres://user:pass@postgres-host/database" \
-    -e POOLS=base,paid,free \
-    -e POOL_BASE_POOL_SIZE=20 \
-    -e POOL_PAID_POOL_SIZE=34 \
-    -e POOL_FREE_POOL_SIZE=10 \
-    -p 5432:5432 \
-    edoburu/pgbouncer
+Typical goal, in one file:
+
+- a **default** pool, inheriting everything
+- a pool that only changes **who passwords are looked up as**
+- a pool that changes **who the session becomes** on the server
+- credentials listed in `userlist.txt`, so those clients need no lookup at all
+
+### Doing it before these variables
+
+`DATABASE_URLS` takes a comma-separated list of URLs and writes one `[databases]`
+entry plus one `userlist.txt` line per URL.
+
+```ini
+DATABASE_URLS=postgres://app:s3cret@postgres-host/appdb,postgres://reporting:r3port@postgres-host/reports
 ```
 
-An application connecting to `…/free` reaches `database` through a pool
-capped at 10 server connections, without competing with the other two. Any
-[connect string parameter](https://pgbouncer.github.io/config.html#section-databases)
-works as a setting, so a pool may also point somewhere else entirely:
+- Every entry is named after its URL's path, so two pools cannot share a database.
+- `pool_size`, `pool_mode` and the rest of the `[databases]` parameters cannot be
+  expressed at all.
+- One value carries both roles: the URL's user becomes the entry's `auth_user`
+  *and* a `userlist.txt` credential.
 
-```sh
-    -e POOL_REPLICA_HOST=replica-host \
-    -e POOL_REPLICA_DBNAME=database \
-    -e POOL_REPLICA_POOL_MODE=session
+Mounting a `pgbouncer.ini` gives full control, at the cost of leaving environment
+configuration behind — every other variable this image reads stops applying.
+
+### Doing it with POOLS and USERS
+
+```ini
+DB_HOST=postgres-host
+DB_NAME=appdb
+DB_USER=appuser
+DB_PASSWORD=s3cret
+
+POOLS=base,audit,readonly,reporting
+
+POOL_BASE_POOL_SIZE=20
+
+POOL_AUDIT_AUTH_USER=auditor
+
+POOL_READONLY_USER=viewer
+POOL_READONLY_PASSWORD=v13wer
+
+POOL_REPORTING_USER=reporter
+POOL_REPORTING_PASSWORD=r3port
+POOL_REPORTING_AUTH_USER=reporter
+POOL_REPORTING_POOL_SIZE=5
+
+USERS=metrics
+USER_METRICS_NAME=metrics.exporter
+USER_METRICS_PASSWORD=…
 ```
 
-Names take letters, digits and underscores, must be unique, and none may be the
-prefix of another, since `POOL_BASE_REPORTING_POOL_SIZE` would otherwise belong
-to both `base` and `base_reporting`. Names differing only in case collide the
-same way. Any of these is refused at startup rather than quietly misread.
+renders
 
-`POOLS` replaces the entries `DATABASE_URL` and `DATABASE_URLS` would have
-generated. `DATABASE_URL` still provides the defaults a pool does not override;
-`DATABASE_URLS` only fills `userlist.txt`, so with it every pool needs a host of
-its own or a `DB_HOST` to inherit.
+```ini
+[databases]
+base = auth_user=appuser dbname=appdb host=postgres-host pool_size=20 port=5432
+audit = auth_user=auditor dbname=appdb host=postgres-host port=5432
+readonly = auth_user=appuser dbname=appdb host=postgres-host password=v13wer port=5432 user=viewer
+reporting = auth_user=reporter dbname=appdb host=postgres-host password=r3port pool_size=5 port=5432 user=reporter
+```
+
+Each pool inherits the connection settings above it, overriding through
+`POOL_<NAME>_<SETTING>` — any [connect string parameter](https://pgbouncer.github.io/config.html#section-databases).
+
+Identity has two independent axes, and a pool may use either, both or neither:
+
+- `POOL_<NAME>_USER` and `_PASSWORD` — the role the **server session** becomes.
+  - Clients reach Postgres as that role whoever they authenticated as.
+  - They then need no role of their own on the server, which is how one database
+    role can serve many pooler credentials.
+- `POOL_<NAME>_AUTH_USER` — the role PgBouncer **looks other users up as**.
+  - Used for clients absent from `userlist.txt`, through `auth_query`.
+  - Leaves the session identity alone: clients still arrive as themselves.
+
+A pool is keyed on **(entry, user)**, so `pool_size` counts per client identity, not
+per entry.
+
+- Two clients arriving as different roles on one entry make two pools, each allowed
+  its own `pool_size` — an entry capped at 20 holds 40 server connections.
+- Setting `POOL_<NAME>_USER` collapses them into one pool, which is what makes the
+  cap mean what it says.
+- Combining it with `POOL_<NAME>_AUTH_USER` keeps clients authenticating as
+  themselves while sharing that single pool.
+- The cost is server-side identity: `current_user`, audit trails, row-level security
+  and per-role grants all see the forced role.
+
+`USERS` fills `userlist.txt`, one entry per name:
+
+- A client listed there is verified against it directly, with no `auth_query`
+  round trip to the server per login.
+- Its password must equal the role's on the server, since PgBouncer presents it
+  onward — unless the pool forces a user, in which case no server role is needed.
+- A verifier copied out of `pg_authid` (`md5…`, `SCRAM-SHA-256$…`) is written
+  through untouched instead of being hashed again.
+- A username can be spelled in ways an environment variable cannot, so the name is
+  a label and `USER_<LABEL>_NAME` carries the real one.
+
+Names in `POOLS` and `USERS` take letters, digits and underscores, must be unique,
+and none may be the prefix of another.
+
+- `POOL_BASE_REPORTING_POOL_SIZE` would otherwise belong to both `base` and
+  `base_reporting`, and names differing only in case collide the same way.
+- Each of these is refused at startup rather than quietly misread.
+
+### DATABASE_URL and DATABASE_URLS
+
+`DATABASE_URL` describes a single connection and still provides the defaults a pool
+does not override.
+
+`DATABASE_URLS` says who may connect *and* what they connect to in one value, which
+`POOLS` and `USERS` split apart.
+
+- The two spellings cannot be combined: mixing them has no single reading, and the
+  container refuses to start rather than pick one.
+- Nothing is lost by migrating — the table below maps each half.
+
+| `DATABASE_URLS` gives you | replacement |
+|---|---|
+| one entry per URL, named by its path | `POOLS` + `POOL_<NAME>_DBNAME` |
+| host and port per URL | `POOL_<NAME>_HOST` / `POOL_<NAME>_PORT` |
+| that URL's user as the entry's `auth_user` | `POOL_<NAME>_AUTH_USER` |
+| that URL's user and password in `userlist.txt` | `USERS` + `USER_<NAME>_PASSWORD` |
 
 Kubernetes integration
 ----------------------

@@ -1,5 +1,7 @@
 # boot: yes
 # The global reaches every pool; one of them wants another encoding.
+# The rendered auth_user=postgres is a default, not something configured here:
+# it can only authenticate when a mounted userlist holds that credential.
 DB_HOST=db.example.com
 DB_NAME=appdb
 CLIENT_ENCODING=UTF8

@@ -1,0 +1,14 @@
+# boot: yes
+# Identity has two axes: who a pool reaches the server as (user), and who it looks
+# passwords up as (auth_user). base sets neither, audit only the second.
+DB_HOST=db.example.com
+DB_NAME=appdb
+DB_USER=appuser
+DB_PASSWORD=s3cret
+POOLS=base,reporting,readonly,audit
+POOL_REPORTING_USER=reporter
+POOL_REPORTING_PASSWORD=r3port
+POOL_REPORTING_AUTH_USER=reporter
+POOL_READONLY_USER=viewer
+POOL_READONLY_PASSWORD=v13wer
+POOL_AUDIT_AUTH_USER=auditor

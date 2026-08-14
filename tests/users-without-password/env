@@ -1,0 +1,7 @@
+# expect: failure
+# Skipping the nameless one instead would start a pooler missing a credential
+# somebody listed, and say so nowhere.
+DB_HOST=db.example.com
+DB_NAME=appdb
+USERS=app,reporting
+USER_APP_PASSWORD=s3cret
