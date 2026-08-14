@@ -1,0 +1,1 @@
+User "metrics.exporter" is already written from DB_USER and DB_PASSWORD: USER_METRICS_PASSWORD would be dropped, so drop "metrics" from USERS

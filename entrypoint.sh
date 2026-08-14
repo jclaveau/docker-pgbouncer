@@ -2,6 +2,7 @@
 # Based on https://raw.githubusercontent.com/brainsam/pgbouncer/master/entrypoint.sh
 
 set -e
+set -f # POOLS and USERS are word-split unquoted, and a name must not reach a glob
 
 # Here are some parameters. See all on
 # https://pgbouncer.github.io/config.html
@@ -195,7 +196,7 @@ function assert_settings_are_usable() {
   env_root="$1"
   names="$2"
   hint="$3"
-  exempt=" $4 " # settings of the process itself, which share the prefix
+  exempt=" $4 " # POOL_MODE configures the process, POOL_SIZE every entry's default
 
   prefixes=""
 
@@ -234,6 +235,53 @@ function assert_settings_are_usable() {
   fi
 }
 
+# Refused here rather than while rendering: a failure mid-render leaves a
+# half-written pgbouncer.ini, which the next start refuses as a mounted config.
+function assert_pools_are_usable() {
+  for name in $(echo "${POOLS}" | tr , ' '); do
+    prefix="$(name_env_prefix POOL "$name")"
+    pool_user="$(env_setting "$prefix" USER)"
+    pool_password="$(env_setting "$prefix" PASSWORD)"
+
+    if [ -z "$(env_setting "$prefix" HOST)${DB_HOST}" ]; then
+      echo "Pool \"$name\" has no host, set ${prefix}HOST or DB_HOST" >&2
+      exit 1
+    fi
+
+    # pgbouncer drops a database line's password when no user carries it.
+    if [ -z "$pool_user" ] && [ -n "$pool_password" ]; then
+      echo "Pool \"$name\" carries ${prefix}PASSWORD with no user to present it as: set ${prefix}USER or unset it" >&2
+      exit 1
+    fi
+
+    # Only a warning: a mounted userlist may hold that role's password.
+    if [ -n "$pool_user" ] && [ -z "$pool_password" ]; then
+      echo "Pool \"$name\" reaches the server as \"$pool_user\" with no password: set ${prefix}PASSWORD or list the role in ${_AUTH_FILE}" >&2
+    fi
+  done
+}
+
+# A pool needs no allowlist, pgbouncer refusing the parameters it knows not.
+# These two are read here and nowhere else, so a third would go nowhere quietly.
+function assert_user_settings_are_known() {
+  accepted=""
+
+  for name in $(echo "${USERS}" | tr , ' '); do
+    prefix="$(name_env_prefix USER "$name")"
+    accepted="${accepted} ${prefix}NAME ${prefix}PASSWORD"
+  done
+
+  problems="$(env | awk -F= -v accepted=" ${accepted} " '
+    index($1, "USER_") != 1 || index(accepted, " " $1 " ") > 0 { next }
+    { print $1 " is not a setting of a USERS name: only NAME and PASSWORD are read" }' \
+    | sort)"
+
+  if [ -n "$problems" ]; then
+    echo "$problems" >&2
+    exit 1
+  fi
+}
+
 # One userlist entry per USERS name, the label standing in for the username when
 # the database spells it in a way an env name cannot.
 function generate_userlist_from_users() {
@@ -260,17 +308,6 @@ function generate_pool_entries() {
   for name in $(echo "${POOLS}" | tr , ' '); do
     prefix="$(name_env_prefix POOL "$name")"
 
-    # Fail here rather than hand pgbouncer an entry with an empty host.
-    pool_host="$(env_setting "$prefix" HOST)"
-    : "${pool_host:-${DB_HOST:?"Setup pgbouncer config error! Pool \"$name\" has no host, set ${prefix}HOST or DB_HOST"}}"
-
-    # Only a warning: a mounted userlist may hold that role's password.
-    pool_user="$(env_setting "$prefix" USER)"
-
-    if [ -n "$pool_user" ] && [ -z "$(env_setting "$prefix" PASSWORD)" ]; then
-      echo "Pool \"$name\" reaches the server as \"$pool_user\" with no password: set ${prefix}PASSWORD or list the role in ${_AUTH_FILE}" >&2
-    fi
-
     printf "%s =%s\n" "$name" "$(pool_connect_string "$prefix" "$name")" \
       >> "${PG_CONFIG_FILE}"
   done
@@ -281,6 +318,11 @@ function generate_pool_entries() {
 if [ -n "${DATABASE_URLS}" ] && [ -n "${POOLS}${USERS}" ]; then
   echo "DATABASE_URLS cannot be combined with POOLS or USERS: name the entries in POOLS and the credentials in USERS" >&2
   exit 1
+fi
+
+# Parsed before the checks below, which read the host and user it carries.
+if [ -n "${DATABASE_URL}" ]; then
+  parse_url "${DATABASE_URL}"
 fi
 
 # An existing config is served as it stands, so these pools would reach nothing.
@@ -299,9 +341,11 @@ esac
 
 assert_names_are_usable POOL Pool "${POOLS}"
 assert_settings_are_usable POOL "${POOLS}" "unset it to inherit" "POOL_MODE POOL_SIZE"
+assert_pools_are_usable
 
 assert_names_are_usable USER User "${USERS}"
 assert_settings_are_usable USER "${USERS}" "give it a value or drop the name from USERS" ""
+assert_user_settings_are_known
 
 # Every credential is checked before one is written: a userlist left half filled
 # by a refused startup outlives it, and the writer skips names already in there.
@@ -310,6 +354,16 @@ for name in $(echo "${USERS}" | tr , ' '); do
 
   if [ -z "$(env_setting "$user_prefix" PASSWORD)" ]; then
     echo "User \"$name\" has no password, set ${user_prefix}PASSWORD" >&2
+    exit 1
+  fi
+
+  user_name="$(env_setting "$user_prefix" NAME)"
+  user_name="${user_name:-$name}"
+
+  # The connection's own credential is written first, and the writer skips a
+  # name already in the file, so this one would be dropped without a word.
+  if [ -n "${DB_PASSWORD}" ] && [ "$user_name" = "${DB_USER}" ]; then
+    echo "User \"$user_name\" is already written from DB_USER and DB_PASSWORD: ${user_prefix}PASSWORD would be dropped, so drop \"$name\" from USERS" >&2
     exit 1
   fi
 done
@@ -322,9 +376,6 @@ if [ -n "${DATABASE_URLS}" ]; then
     generate_userlist_if_needed
   done
 else
-  if [ -n "${DATABASE_URL}" ]; then
-    parse_url "${DATABASE_URL}"
-  fi
   generate_userlist_if_needed
 fi
 
@@ -342,10 +393,6 @@ if [ ! -f "${PG_CONFIG_FILE}" ]; then
 ################## Auto generated ##################
 [databases]
 " > "${PG_CONFIG_FILE}"
-
-  if [ -n "$DATABASE_URL" ]; then
-    parse_url "$DATABASE_URL"
-  fi
 
   if [ -n "$POOLS" ]; then
     generate_pool_entries

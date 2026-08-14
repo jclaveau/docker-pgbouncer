@@ -143,6 +143,10 @@ reporting = auth_user=reporter dbname=appdb host=postgres-host password=r3port p
 Each pool inherits the connection settings above it, overriding through
 `POOL_<NAME>_<SETTING>` — any [connect string parameter](https://pgbouncer.github.io/config.html#section-databases).
 
+With no `DB_NAME` to inherit, a pool's `dbname` is its own name, so the pools then
+address a database each rather than one between them. The single entry defaults to
+the `*` catch-all instead; pools carry none.
+
 Identity has two independent axes, and a pool may use either, both or neither:
 
 - `POOL_<NAME>_USER` and `_PASSWORD` — the role the **server session** becomes.
@@ -188,12 +192,20 @@ than misread in silence:
 
 - a setting naming nothing in the list — `POOL_BSAE_POOL_SIZE` beside
   `POOLS=base` would otherwise leave a pool of plain defaults and say nothing.
-  - `POOL_MODE` and `POOL_SIZE` keep their meaning: they configure the process,
-    not a pool named `MODE` or `SIZE`.
+  - `POOL_MODE` and `POOL_SIZE` keep their meaning — the pool mode of the process,
+    and the default size of every entry — rather than becoming settings of a pool
+    named `MODE` or `SIZE`.
+  - `USER_<LABEL>_NAME` and `_PASSWORD` are the only settings a `USERS` name has,
+    so a third is refused rather than dropped. A pool's are pgbouncer's to judge.
 - an empty override, which is a reference resolving to nothing far more often than
   a request to blank an inherited value.
 - a name in `USERS` with no password, every name checked before the first one is
   written, since `userlist.txt` usually outlives the container that filled it.
+- a name in `USERS` that `DB_USER` already spells, whose credential is written
+  first — the listed password would be dropped for the other one.
+- a pool with no host, neither its own nor a `DB_HOST` to inherit.
+- a pool carrying `POOL_<NAME>_PASSWORD` and no `POOL_<NAME>_USER` to present it
+  as: PgBouncer drops such a password, leaving it in the file for nothing.
 - `POOLS` beside a mounted `pgbouncer.ini`: that file is served as it stands, so
   the pools would be rendered nowhere.
 

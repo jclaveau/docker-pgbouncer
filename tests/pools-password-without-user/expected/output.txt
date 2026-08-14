@@ -1,0 +1,1 @@
+Pool "forced" carries POOL_FORCED_PASSWORD with no user to present it as: set POOL_FORCED_USER or unset it

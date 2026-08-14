@@ -1,0 +1,1 @@
+Pool name "*" is not usable: POOLS takes letters, digits and underscores

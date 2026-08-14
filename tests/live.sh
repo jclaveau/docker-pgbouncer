@@ -108,6 +108,7 @@ docker run -d --name "$pools_container" --network "$network" \
   --env LISTEN_PORT=6432 \
   --env SERVER_TLS_SSLMODE=disable \
   --env ADMIN_USERS=appuser \
+  --env DEFAULT_POOL_SIZE=7 \
   --env POOLS=base,paid,free,capped,forced,orphan \
   --env POOL_BASE_POOL_SIZE=20 \
   --env POOL_PAID_POOL_SIZE=34 \
@@ -206,7 +207,7 @@ if [ "$second_user" != "reporting" ]; then
 fi
 
 # A setting on a pool has to reach the session, not merely parse. base is the
-# witness: same server, no overrides.
+# witness: same server, nothing overridden but its size.
 {
   printf 'base timezone=%s\n' "$(query_pool base "select current_setting('TimeZone')")"
   printf 'free timezone=%s\n' "$(query_pool free "select current_setting('TimeZone')")"

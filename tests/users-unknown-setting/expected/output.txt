@@ -1,0 +1,1 @@
+USER_APP_PASWORD is not a setting of a USERS name: only NAME and PASSWORD are read

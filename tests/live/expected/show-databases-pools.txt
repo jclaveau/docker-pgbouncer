@@ -1,7 +1,7 @@
 base|5432|20
 capped|5432|1
-forced|5432|20
+forced|5432|7
 free|5432|10
-orphan|5432|20
+orphan|5432|7
 paid|5432|34
 pgbouncer|6432|2

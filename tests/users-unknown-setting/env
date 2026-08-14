@@ -1,0 +1,8 @@
+# expect: failure
+# A pool's settings reach pgbouncer, which reports the ones it knows not. These
+# reach only the userlist writer, so a misspelt one has nowhere else to surface.
+DB_HOST=db.example.com
+DB_NAME=appdb
+USERS=app
+USER_APP_PASSWORD=s3cret
+USER_APP_PASWORD=oops

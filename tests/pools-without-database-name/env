@@ -1,0 +1,8 @@
+# boot: yes
+# With no DB_NAME to inherit, a pool addresses the database its own name spells,
+# so these two are two databases rather than two pools onto one. The legacy
+# single entry defaults to the `*` catch-all instead; pools carry none.
+# The rendered auth_user=postgres is a default, not something configured here:
+# it can only authenticate when a mounted userlist holds that credential.
+DB_HOST=db.example.com
+POOLS=base,paid

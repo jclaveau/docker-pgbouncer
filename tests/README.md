@@ -61,14 +61,24 @@ tests/live.sh
   field including the host, and everything it refuses. `live.sh` then serves
   traffic through three pools onto one database and reads their sizes back from
   `SHOW DATABASES`.
-- Every refusal happens before a single file is touched, which is why none of
-  their `expected/output.txt` carries the `Creating pgbouncer config` line.
+- Every `POOLS` and `USERS` refusal happens before a single file is touched, which
+  is why none of their `expected/output.txt` carries the `Creating pgbouncer config`
+  line. Only the legacy `missing-db-host` still fails mid-render, as it always did.
   - A `USERS` name missing its password is caught in that same pass rather than
     mid-write: `userlist.txt` is often a mounted volume, and the writer skips
     names already in it, so a half-written file outlives the startup that made it.
+  - `pools-missing-host` is the same argument for `pgbouncer.ini`: rendering that
+    far and failing then leaves a file the next start refuses as a mounted config.
 - A setting is refused when it names nothing in `POOLS` or `USERS`
   (`pools-unlisted-setting`), since a misspelt pool otherwise renders defaults and
-  says nothing. `POOL_MODE` and `POOL_SIZE` are exempt: they configure the process.
+  says nothing. `POOL_MODE` and `POOL_SIZE` are exempt — the process's pool mode,
+  and the default size of every entry, not settings of a pool named `MODE`/`SIZE`.
+  - A pool's settings need no allowlist, pgbouncer reporting the parameters it
+    knows not. A `USERS` name's do (`users-unknown-setting`): only `NAME` and
+    `PASSWORD` are ever read, and nothing downstream sees a third to complain.
+- `POOLS` and `USERS` are word-split unquoted, so `set -f` keeps a name out of the
+  shell's globbing — `pools-glob-name` reads `*` as the name it is, and without
+  that line the message would come back naming a file in the container's root.
 - A pool's settings are sorted before they reach the line — `env` order is not
   stable enough to compare against a file.
 - `auth_user` follows `DB_USER`, then `AUTH_USER`, then `postgres`, for entries and
