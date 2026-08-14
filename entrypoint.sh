@@ -188,22 +188,49 @@ function assert_names_are_usable() {
   done
 }
 
-# A setting carries a name and a value; empty means a reference that resolved to
-# nothing, never an instruction to blank an inherited value.
-function unusable_settings() {
-  for name in $(echo "$2" | tr , ' '); do
-    env | awk -F= -v prefix="$(name_env_prefix "$1" "$name")" -v hint="$3" '
-      index($0, prefix) == 1 {
-        key = substr($1, length(prefix) + 1)
+# A setting addresses a name the list holds and carries a value; empty means a
+# reference that resolved to nothing, never an instruction to blank an inherited one.
+function assert_settings_are_usable() {
+  env_root="$1"
+  names="$2"
+  hint="$3"
+  exempt=" $4 " # settings of the process itself, which share the prefix
 
-        if (key == "") {
+  prefixes=""
+
+  for name in $(echo "$names" | tr , ' '); do
+    prefixes="${prefixes} $(name_env_prefix "$env_root" "$name")"
+  done
+
+  problems="$(env | awk -F= -v root="${env_root}_" -v list="${env_root}S" \
+    -v prefixes="$prefixes" -v exempt="$exempt" -v hint="$hint" '
+      index($1, root) != 1 || index(exempt, " " $1 " ") > 0 { next }
+
+      {
+        count = split(prefixes, known, " ")
+        prefix = ""
+
+        for (i = 1; i <= count; i++) {
+          if (index($1, known[i]) == 1) {
+            prefix = known[i]
+          }
+        }
+
+        if (prefix == "") {
+          print $1 " is not a setting of any name in " list
+        }
+        else if ($1 == prefix) {
           print $1 " names no setting"
         }
         else if (substr($0, length($1) + 2) == "") {
           print $1 " is empty, " hint
         }
-      }'
-  done
+      }' | sort)" # a stable order to report them in, which env has not
+
+  if [ -n "$problems" ]; then
+    echo "$problems" >&2
+    exit 1
+  fi
 }
 
 # One userlist entry per USERS name, the label standing in for the username when
@@ -219,11 +246,6 @@ function generate_userlist_from_users() {
     DB_USER="$(env_setting "$prefix" NAME)"
     DB_USER="${DB_USER:-$name}"
     DB_PASSWORD="$(env_setting "$prefix" PASSWORD)"
-
-    if [ -z "${DB_PASSWORD}" ]; then
-      echo "User \"$name\" has no password, set ${prefix}PASSWORD" >&2
-      exit 1
-    fi
 
     generate_userlist_if_needed
   done
@@ -241,6 +263,13 @@ function generate_pool_entries() {
     pool_host="$(env_setting "$prefix" HOST)"
     : "${pool_host:-${DB_HOST:?"Setup pgbouncer config error! Pool \"$name\" has no host, set ${prefix}HOST or DB_HOST"}}"
 
+    # Only a warning: a mounted userlist may hold that role's password.
+    pool_user="$(env_setting "$prefix" USER)"
+
+    if [ -n "$pool_user" ] && [ -z "$(env_setting "$prefix" PASSWORD)" ]; then
+      echo "Pool \"$name\" reaches the server as \"$pool_user\" with no password: set ${prefix}PASSWORD or list the role in ${_AUTH_FILE}" >&2
+    fi
+
     printf "%s =%s\n" "$name" "$(pool_connect_string "$prefix" "$name")" \
       >> "${PG_CONFIG_FILE}"
   done
@@ -253,15 +282,36 @@ if [ -n "${DATABASE_URLS}" ] && [ -n "${POOLS}${USERS}" ]; then
   exit 1
 fi
 
-if [ -n "${USERS}" ]; then
-  assert_names_are_usable USER User "${USERS}"
-  unusable_user_settings="$(unusable_settings USER "${USERS}" "give it a value or drop the name from USERS")"
+# An existing config is served as it stands, so these pools would reach nothing.
+if [ -n "${POOLS}" ] && [ -f "${PG_CONFIG_FILE}" ]; then
+  echo "POOLS cannot be used with an existing ${PG_CONFIG_FILE}: that file is served as it stands, so no pool would be rendered into it" >&2
+  exit 1
+fi
 
-  if [ -n "$unusable_user_settings" ]; then
-    echo "$unusable_user_settings" >&2
+# pgbouncer keeps this name for its admin console and refuses a database using it.
+case ",${POOLS}," in
+  *,pgbouncer,*)
+    echo "Pool name \"pgbouncer\" is reserved for pgbouncer's own admin console" >&2
+    exit 1
+    ;;
+esac
+
+assert_names_are_usable POOL Pool "${POOLS}"
+assert_settings_are_usable POOL "${POOLS}" "unset it to inherit" "POOL_MODE POOL_SIZE"
+
+assert_names_are_usable USER User "${USERS}"
+assert_settings_are_usable USER "${USERS}" "give it a value or drop the name from USERS" ""
+
+# Every credential is checked before one is written: a userlist left half filled
+# by a refused startup outlives it, and the writer skips names already in there.
+for name in $(echo "${USERS}" | tr , ' '); do
+  user_prefix="$(name_env_prefix USER "$name")"
+
+  if [ -z "$(env_setting "$user_prefix" PASSWORD)" ]; then
+    echo "User \"$name\" has no password, set ${user_prefix}PASSWORD" >&2
     exit 1
   fi
-fi
+done
 
 # Write the password with MD5 encryption, to avoid printing it during startup.
 # Notice that `docker inspect` will show unencrypted env variables.
@@ -297,14 +347,6 @@ if [ ! -f "${PG_CONFIG_FILE}" ]; then
   fi
 
   if [ -n "$POOLS" ]; then
-    assert_names_are_usable POOL Pool "${POOLS}"
-    unusable_overrides="$(unusable_settings POOL "${POOLS}" "unset it to inherit")"
-
-    if [ -n "$unusable_overrides" ]; then
-      echo "$unusable_overrides" >&2
-      exit 1
-    fi
-
     generate_pool_entries
   elif [ -n "$DATABASE_URLS" ]; then
     echo "$DATABASE_URLS" | tr , '\n' | while read url; do
@@ -400,7 +442,19 @@ ${TCP_KEEPINTVL:+tcp_keepintvl = ${TCP_KEEPINTVL}\n}\
 ${TCP_USER_TIMEOUT:+tcp_user_timeout = ${TCP_USER_TIMEOUT}\n}\
 ################## end file ##################
 " >> "${PG_CONFIG_FILE}"
-  cat "${PG_CONFIG_FILE}"
+
+  # A pool's password has to reach the file in the clear, and the logs never.
+  awk '
+    BEGIN {
+      quote = sprintf("%c", 39)
+      quoted = "password=" quote "((" quote quote ")|([^" quote "]))*" quote
+    }
+
+    {
+      gsub(quoted, "password=***")
+      gsub(/password=[^ ]+/, "password=***")
+      print
+    }' "${PG_CONFIG_FILE}"
 fi
 
 echo "Starting $*..."

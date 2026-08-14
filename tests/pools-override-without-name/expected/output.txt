@@ -1,2 +1,1 @@
-Creating pgbouncer config in /etc/pgbouncer
 POOL_BASE_ names no setting

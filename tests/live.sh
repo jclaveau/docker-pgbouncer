@@ -34,10 +34,6 @@ docker run -d --name "$postgres_container" --network "$network" \
   --env POSTGRES_DB=appdb \
   "$postgres_image" > /dev/null
 
-extra_roles_sql="create role reporting login password 'r3port';
-create role readonly login password 'r3ad0nly';
-create role mismatched login password 'the-server-one'"
-
 deadline=$((SECONDS + 60))
 
 until docker exec "$postgres_container" pg_isready -U appuser -d appdb > /dev/null 2>&1; do
@@ -112,13 +108,14 @@ docker run -d --name "$pools_container" --network "$network" \
   --env LISTEN_PORT=6432 \
   --env SERVER_TLS_SSLMODE=disable \
   --env ADMIN_USERS=appuser \
-  --env POOLS=base,paid,free,capped,forced \
+  --env POOLS=base,paid,free,capped,forced,orphan \
   --env POOL_BASE_POOL_SIZE=20 \
   --env POOL_PAID_POOL_SIZE=34 \
   --env POOL_FREE_POOL_SIZE=10 \
   --env POOL_FREE_TIMEZONE=Europe/Paris \
   --env POOL_FREE_CLIENT_ENCODING=LATIN1 \
   --env POOL_CAPPED_POOL_SIZE=1 \
+  --env POOL_ORPHAN_USER=readonly \
   --env USERS=reporting,ghost,mismatched \
   --env USER_REPORTING_PASSWORD=r3port \
   --env USER_GHOST_PASSWORD=gh0st \
@@ -138,6 +135,34 @@ until docker logs "$pools_container" 2>&1 | grep -q "process up:"; do
 
   sleep 1
 done
+
+pools_log=$(docker logs "$pools_container" 2>&1)
+
+# A pool's password reaches the rendered file in the clear. The logs get a mask.
+case "$pools_log" in
+  *r3ad0nly*)
+    echo "the pooler printed a pool's password while echoing its config"
+    exit 1
+    ;;
+esac
+
+case "$pools_log" in
+  *'password=***'*) ;;
+  *)
+    echo "expected the echoed config to carry a masked password, got:"
+    echo "$pools_log" | awk '/^forced =/ { print "  " $0 }'
+    exit 1
+    ;;
+esac
+
+# orphan forces a user whose password is nowhere: a runtime failure, warned of here.
+case "$pools_log" in
+  *'Pool "orphan" reaches the server as "readonly" with no password'*) ;;
+  *)
+    echo "expected a warning for a pool forcing a user it holds no password for"
+    exit 1
+    ;;
+esac
 
 # Every tier must reach the one real database, each through its own pool.
 for pool in base paid free; do
@@ -161,6 +186,10 @@ query_pool() {
   docker exec --env PGPASSWORD=s3cret "$pools_container" \
     psql "postgres://appuser@127.0.0.1:6432/$1" -tAX -c "$2"
 }
+
+extra_roles_sql="create role reporting login password 'r3port';
+create role readonly login password 'r3ad0nly';
+create role mismatched login password 'the-server-one'"
 
 # A credential named in USERS has to authenticate, not merely reach userlist.txt.
 docker exec --env PGPASSWORD=s3cret "$postgres_container" \
@@ -243,18 +272,26 @@ done
 
 deadline=$((SECONDS + 30))
 
-until [ "$(query_pool pgbouncer "SHOW POOLS" | awk -F'|' '$1 == "capped" { print $4 }')" = "1" ]; do
+# The recorded line is the very snapshot that satisfied the wait: querying again
+# would read a pool the held transaction may have left in the meantime.
+while : ; do
+  capped_pool=$(query_pool pgbouncer "SHOW POOLS" | awk -F'|' '$1 == "capped"')
+
+  if [ "$(echo "$capped_pool" | awk -F'|' '{ print $4 }')" = "1" ]; then
+    break
+  fi
+
   if [ "$SECONDS" -ge "$deadline" ]; then
     echo "no client ever queued on a pool of one, so pool_size did not cap:"
-    query_pool pgbouncer "SHOW POOLS" | awk -F'|' '$1 == "capped"' | awk '{ print "  " $0 }'
+    echo "$capped_pool" | awk '{ print "  " $0 }'
     exit 1
   fi
 
   sleep 1
 done
 
-query_pool pgbouncer "SHOW POOLS" \
-  | awk -F'|' '$1 == "capped" { print "capped cl_active=" $3 " cl_waiting=" $4 " sv_active=" $7 }' \
+echo "$capped_pool" \
+  | awk -F'|' '{ print "capped cl_active=" $3 " cl_waiting=" $4 " sv_active=" $7 }' \
   >> "$work_dir/pool-effects.txt"
 
 status=0

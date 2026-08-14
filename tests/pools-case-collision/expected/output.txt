@@ -1,2 +1,1 @@
-Creating pgbouncer config in /etc/pgbouncer
 Pool names "Base" and "base" overlap: the settings of one would be read as the other's

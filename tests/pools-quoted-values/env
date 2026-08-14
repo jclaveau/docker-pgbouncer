@@ -1,9 +1,10 @@
 # boot: yes
-# A connect string value holding a space has to reach pgbouncer quoted.
+# A value holding a space has to reach pgbouncer quoted, and a quote inside it
+# doubled, which is the pair its connect string parser reads back.
 # The rendered auth_user=postgres is a default, not something configured here:
 # it can only authenticate when a mounted userlist holds that credential.
 DB_HOST=db.example.com
 DB_NAME=appdb
 POOLS=base
-POOL_BASE_CONNECT_QUERY=SELECT 1
+POOL_BASE_CONNECT_QUERY=SELECT 'a b'
 POOL_BASE_DATESTYLE=ISO, MDY

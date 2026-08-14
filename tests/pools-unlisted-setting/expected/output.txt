@@ -1,0 +1,2 @@
+POOL_BASE is not a setting of any name in POOLS
+POOL_BSAE_POOL_SIZE is not a setting of any name in POOLS

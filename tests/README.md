@@ -37,6 +37,10 @@ tests/<case>/expected/output.txt     for cases the entrypoint is meant to reject
     - `SHOW POOLS` while a pool of one holds a transaction and a second client
       waits. Drop that `pool_size` and it reads `cl_waiting=0`, so the assertion
       cannot pass vacuously
+  - it also reads the container's own log, for the two things no rendered file
+    can show:
+    - the echoed config carries `password=***` and nowhere the password itself
+    - a pool forcing a user it holds no password for is warned about at boot
   - its expectations live in `tests/live/expected/`, and they move when the
     pinned pgbouncer version changes; that diff is the review signal for a bump
 
@@ -54,9 +58,17 @@ tests/live.sh
 ## Behaviours worth knowing
 
 - `pools-*` cases cover `POOLS`: the rendered entries, an override of every
-  field including the host, and the two names it refuses. `live.sh` then serves
+  field including the host, and everything it refuses. `live.sh` then serves
   traffic through three pools onto one database and reads their sizes back from
   `SHOW DATABASES`.
+- Every refusal happens before a single file is touched, which is why none of
+  their `expected/output.txt` carries the `Creating pgbouncer config` line.
+  - A `USERS` name missing its password is caught in that same pass rather than
+    mid-write: `userlist.txt` is often a mounted volume, and the writer skips
+    names already in it, so a half-written file outlives the startup that made it.
+- A setting is refused when it names nothing in `POOLS` or `USERS`
+  (`pools-unlisted-setting`), since a misspelt pool otherwise renders defaults and
+  says nothing. `POOL_MODE` and `POOL_SIZE` are exempt: they configure the process.
 - A pool's settings are sorted before they reach the line — `env` order is not
   stable enough to compare against a file.
 - An empty override is refused by the entrypoint rather than passed on, because
@@ -91,5 +103,5 @@ tests/live.sh
   The role ends up with `rolpassword` NULL, which no `md5` or `scram-sha-256`
   exchange can satisfy. A `userlist.txt` line built from one would be a
   credential that fails every login, quietly, at runtime.
-- `missing-db-host/expected/output.txt` carries the line number the entrypoint
-  failed on, so it moves whenever lines are added above `generate_config_db_entry`.
+- The shell names the line a failure came from, and every edit above it moves
+  that number, so `run.sh` rewrites it to `line N` before comparing.

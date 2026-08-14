@@ -130,7 +130,7 @@ USER_METRICS_NAME=metrics.exporter
 USER_METRICS_PASSWORD=…
 ```
 
-renders
+renders — the copy echoed at startup shows those two passwords as `***`
 
 ```ini
 [databases]
@@ -181,7 +181,28 @@ and none may be the prefix of another.
 
 - `POOL_BASE_REPORTING_POOL_SIZE` would otherwise belong to both `base` and
   `base_reporting`, and names differing only in case collide the same way.
-- Each of these is refused at startup rather than quietly misread.
+- `pgbouncer` is refused as a pool name: that one belongs to the admin console.
+
+The rest is refused too, at startup and before a single file is written, rather
+than misread in silence:
+
+- a setting naming nothing in the list — `POOL_BSAE_POOL_SIZE` beside
+  `POOLS=base` would otherwise leave a pool of plain defaults and say nothing.
+  - `POOL_MODE` and `POOL_SIZE` keep their meaning: they configure the process,
+    not a pool named `MODE` or `SIZE`.
+- an empty override, which is a reference resolving to nothing far more often than
+  a request to blank an inherited value.
+- a name in `USERS` with no password, every name checked before the first one is
+  written, since `userlist.txt` usually outlives the container that filled it.
+- `POOLS` beside a mounted `pgbouncer.ini`: that file is served as it stands, so
+  the pools would be rendered nowhere.
+
+Two things are reported instead of refused:
+
+- a pool forcing a user it carries no password for gets a warning — a mounted
+  `userlist.txt` may hold that password, so it cannot be an error.
+- the config echoed at startup shows `password=***`. The passwords reach the file,
+  never the logs.
 
 ### DATABASE_URL and DATABASE_URLS
 

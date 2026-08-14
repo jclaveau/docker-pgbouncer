@@ -1,0 +1,7 @@
+# boot: yes
+# No DB_HOST to inherit, so each pool's own host is all that stands between the
+# entry and the empty host the entrypoint refuses.
+DB_NAME=appdb
+POOLS=primary,replica
+POOL_PRIMARY_HOST=primary.example.com
+POOL_REPLICA_HOST=replica.example.com

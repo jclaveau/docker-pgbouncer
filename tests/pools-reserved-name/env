@@ -1,0 +1,6 @@
+# expect: failure
+# pgbouncer refuses the whole file over this one, and the admin console is what
+# the operator loses if it ever went through.
+DB_HOST=db.example.com
+DB_NAME=appdb
+POOLS=base,pgbouncer

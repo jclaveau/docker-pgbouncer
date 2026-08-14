@@ -1,2 +1,1 @@
-Wrote authentication credentials for 'app' to /etc/pgbouncer/userlist.txt
 User "reporting" has no password, set USER_REPORTING_PASSWORD
