@@ -70,3 +70,50 @@ jobs:
         env:
           IMAGE: edoburu/pgbouncer:test
           POSTGRES_IMAGE: postgres:${{ matrix.postgres }}
+
+  # The image the tests just ran, never a rebuild of the same commit.
+  publish:
+    needs: [rendered-config, live]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: image
+
+      - run: docker load -i image.tar
+
+      - name: Push to ghcr.io
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISHED: ghcr.io/${{ github.repository }}
+        run: |
+          set -o pipefail
+          pgbouncer_version=$(awk -F= '/^ARG VERSION=/ { print $2 }' Dockerfile)
+
+          # An unread version would tag the image "-${GITHUB_SHA::7}" and push it.
+          : "${pgbouncer_version:?no ARG VERSION in Dockerfile to tag with}"
+
+          echo "$REGISTRY_TOKEN" \
+            | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+
+          for tag in latest "sha-${GITHUB_SHA::7}" "$pgbouncer_version-${GITHUB_SHA::7}"; do
+            docker tag edoburu/pgbouncer:test "$PUBLISHED:$tag"
+            docker push "$PUBLISHED:$tag"
+          done
+
+          # Read back from the registry, since a tag moves and a consumer pins.
+          digest=$(docker buildx imagetools inspect "$PUBLISHED:latest" \
+            --format '{{.Manifest.Digest}}')
+
+          {
+            echo "### Published"
+            echo "\`$PUBLISHED:$pgbouncer_version-${GITHUB_SHA::7}\`"
+            echo "\`$PUBLISHED@$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
