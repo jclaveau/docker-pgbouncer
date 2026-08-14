@@ -1,0 +1,11 @@
+# expect: failure
+# The connection's credential is written first and the writer skips a name it
+# finds, so this password would be dropped for the other one. The label is not
+# what collides: USER_METRICS_NAME is resolved before the two are compared.
+DB_HOST=db.example.com
+DB_NAME=appdb
+DB_USER=metrics.exporter
+DB_PASSWORD=s3cret
+USERS=metrics
+USER_METRICS_NAME=metrics.exporter
+USER_METRICS_PASSWORD=different

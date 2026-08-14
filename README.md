@@ -72,6 +72,169 @@ docker run --rm \
     edoburu/pgbouncer
 ```
 
+Multiple pools and users
+------------------------
+
+One PgBouncer can serve the same database through several pools, each with its own
+size and its own identity, and hold credentials for several clients.
+
+Typical goal, in one file:
+
+- a **default** pool, inheriting everything
+- a pool that only changes **who passwords are looked up as**
+- a pool that changes **who the session becomes** on the server
+- credentials listed in `userlist.txt`, so those clients need no lookup at all
+
+### Doing it before these variables
+
+`DATABASE_URLS` takes a comma-separated list of URLs and writes one `[databases]`
+entry plus one `userlist.txt` line per URL.
+
+```ini
+DATABASE_URLS=postgres://app:s3cret@postgres-host/appdb,postgres://reporting:r3port@postgres-host/reports
+```
+
+- Every entry is named after its URL's path, so two pools cannot share a database.
+- `pool_size`, `pool_mode` and the rest of the `[databases]` parameters cannot be
+  expressed at all.
+- One value carries both roles: the URL's user becomes the entry's `auth_user`
+  *and* a `userlist.txt` credential.
+
+Mounting a `pgbouncer.ini` gives full control, at the cost of leaving environment
+configuration behind — every other variable this image reads stops applying.
+
+### Doing it with POOLS and USERS
+
+```ini
+DB_HOST=postgres-host
+DB_NAME=appdb
+DB_USER=appuser
+DB_PASSWORD=s3cret
+
+POOLS=base,audit,readonly,reporting
+
+POOL_BASE_POOL_SIZE=20
+
+POOL_AUDIT_AUTH_USER=auditor
+
+POOL_READONLY_USER=viewer
+POOL_READONLY_PASSWORD=v13wer
+
+POOL_REPORTING_USER=reporter
+POOL_REPORTING_PASSWORD=r3port
+POOL_REPORTING_AUTH_USER=reporter
+POOL_REPORTING_POOL_SIZE=5
+
+USERS=metrics
+USER_METRICS_NAME=metrics.exporter
+USER_METRICS_PASSWORD=…
+```
+
+renders — the copy echoed at startup shows those two passwords as `***`
+
+```ini
+[databases]
+base = auth_user=appuser dbname=appdb host=postgres-host pool_size=20 port=5432
+audit = auth_user=auditor dbname=appdb host=postgres-host port=5432
+readonly = auth_user=appuser dbname=appdb host=postgres-host password=v13wer port=5432 user=viewer
+reporting = auth_user=reporter dbname=appdb host=postgres-host password=r3port pool_size=5 port=5432 user=reporter
+```
+
+Each pool inherits the connection settings above it, overriding through
+`POOL_<NAME>_<SETTING>` — any [connect string parameter](https://pgbouncer.github.io/config.html#section-databases).
+
+With no `DB_NAME` to inherit, a pool's `dbname` is its own name, so the pools then
+address a database each rather than one between them. The single entry defaults to
+the `*` catch-all instead; pools carry none.
+
+Identity has two independent axes, and a pool may use either, both or neither:
+
+- `POOL_<NAME>_USER` and `_PASSWORD` — the role the **server session** becomes.
+  - Clients reach Postgres as that role whoever they authenticated as.
+  - They then need no role of their own on the server, which is how one database
+    role can serve many pooler credentials.
+- `POOL_<NAME>_AUTH_USER` — the role PgBouncer **looks other users up as**.
+  - Used for clients absent from `userlist.txt`, through `auth_query`.
+  - Leaves the session identity alone: clients still arrive as themselves.
+
+A pool is keyed on **(entry, user)**, so `pool_size` counts per client identity, not
+per entry.
+
+- Two clients arriving as different roles on one entry make two pools, each allowed
+  its own `pool_size` — an entry capped at 20 holds 40 server connections.
+- Setting `POOL_<NAME>_USER` collapses them into one pool, which is what makes the
+  cap mean what it says.
+- Combining it with `POOL_<NAME>_AUTH_USER` keeps clients authenticating as
+  themselves while sharing that single pool.
+- The cost is server-side identity: `current_user`, audit trails, row-level security
+  and per-role grants all see the forced role.
+
+`USERS` fills `userlist.txt`, one entry per name:
+
+- A client listed there is verified against it directly, with no `auth_query`
+  round trip to the server per login.
+- Its password must equal the role's on the server, since PgBouncer presents it
+  onward — unless the pool forces a user, in which case no server role is needed.
+- A verifier copied out of `pg_authid` (`md5…`, `SCRAM-SHA-256$…`) is written
+  through untouched instead of being hashed again.
+- A username can be spelled in ways an environment variable cannot, so the name is
+  a label and `USER_<LABEL>_NAME` carries the real one.
+
+Names in `POOLS` and `USERS` take letters, digits and underscores, must be unique,
+and none may be the prefix of another.
+
+- `POOL_BASE_REPORTING_POOL_SIZE` would otherwise belong to both `base` and
+  `base_reporting`, and names differing only in case collide the same way.
+- `pgbouncer` is refused as a pool name: that one belongs to the admin console.
+
+The rest is refused too, at startup and before a single file is written, rather
+than misread in silence:
+
+- a setting naming nothing in the list — `POOL_BSAE_POOL_SIZE` beside
+  `POOLS=base` would otherwise leave a pool of plain defaults and say nothing.
+  - `POOL_MODE` and `POOL_SIZE` keep their meaning — the pool mode of the process,
+    and the default size of every entry — rather than becoming settings of a pool
+    named `MODE` or `SIZE`.
+  - `USER_<LABEL>_NAME` and `_PASSWORD` are the only settings a `USERS` name has,
+    so a third is refused rather than dropped. A pool's are pgbouncer's to judge.
+- an empty override, which is a reference resolving to nothing far more often than
+  a request to blank an inherited value.
+- a name in `USERS` with no password, every name checked before the first one is
+  written, since `userlist.txt` usually outlives the container that filled it.
+- a name in `USERS` that `DB_USER` already spells, whose credential is written
+  first — the listed password would be dropped for the other one.
+- a pool with no host, neither its own nor a `DB_HOST` to inherit.
+- a pool carrying `POOL_<NAME>_PASSWORD` and no `POOL_<NAME>_USER` to present it
+  as: PgBouncer drops such a password, leaving it in the file for nothing.
+- `POOLS` beside a mounted `pgbouncer.ini`: that file is served as it stands, so
+  the pools would be rendered nowhere.
+
+Two things are reported instead of refused:
+
+- a pool forcing a user it carries no password for gets a warning — a mounted
+  `userlist.txt` may hold that password, so it cannot be an error.
+- the config echoed at startup shows `password=***`. The passwords reach the file,
+  never the logs.
+
+### DATABASE_URL and DATABASE_URLS
+
+`DATABASE_URL` describes a single connection and still provides the defaults a pool
+does not override.
+
+`DATABASE_URLS` says who may connect *and* what they connect to in one value, which
+`POOLS` and `USERS` split apart.
+
+- The two spellings cannot be combined: mixing them has no single reading, and the
+  container refuses to start rather than pick one.
+- Nothing is lost by migrating — the table below maps each half.
+
+| `DATABASE_URLS` gives you | replacement |
+|---|---|
+| one entry per URL, named by its path | `POOLS` + `POOL_<NAME>_DBNAME` |
+| host and port per URL | `POOL_<NAME>_HOST` / `POOL_<NAME>_PORT` |
+| that URL's user as the entry's `auth_user` | `POOL_<NAME>_AUTH_USER` |
+| that URL's user and password in `userlist.txt` | `USERS` + `USER_<NAME>_PASSWORD` |
+
 Kubernetes integration
 ----------------------
 
@@ -137,6 +300,9 @@ examples/generate-userlist >> userlist.txt
 
 You can also connect with a single user to PgBouncer, and from there retrieve the actual database password
 by setting ``AUTH_USER``. See the example from: <https://www.cybertec-postgresql.com/en/pgbouncer-authentication-made-easy/>
+
+Every database entry takes ``DB_USER`` as its ``auth_user`` when that is set, ``AUTH_USER`` otherwise,
+and falls back to ``postgres``. Pools inherit that same order unless they carry a ``POOL_<NAME>_AUTH_USER``.
 
 Connecting to the admin console
 -------------------------------

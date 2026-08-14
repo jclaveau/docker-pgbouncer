@@ -1,0 +1,10 @@
+# boot: yes
+# A verifier copied out of pg_authid must reach userlist.txt untouched; hashing
+# it again would produce a password nobody can present.
+# The rendered auth_user=postgres is a default, not something configured here:
+# it can only authenticate when a mounted userlist holds that credential.
+DB_HOST=db.example.com
+DB_NAME=appdb
+USERS=app,legacy
+USER_APP_PASSWORD=SCRAM-SHA-256$4096:c2FsdA==$c3RvcmVk:c2VydmVy
+USER_LEGACY_PASSWORD=md5d41d8cd98f00b204e9800998ecf8427e

@@ -1,0 +1,5 @@
+# expect: failure
+# The list is word-split unquoted, so without `set -f` the shell would expand
+# this against the container's root and name a file the operator never typed.
+DB_HOST=db.example.com
+POOLS=*

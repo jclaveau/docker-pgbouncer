@@ -13,11 +13,13 @@ expected_dir="$tests_dir/live/expected"
 network=pgbouncer-live-test
 postgres_container=pgbouncer-live-postgres
 pooler_container=pgbouncer-live-pooler
+pools_container=pgbouncer-live-pools
 
 work_dir=$(mktemp -d)
 
 teardown() {
-  docker rm -f "$pooler_container" "$postgres_container" > /dev/null 2>&1 || true
+  docker rm -f "$pools_container" "$pooler_container" "$postgres_container" \
+    > /dev/null 2>&1 || true
   docker network rm "$network" > /dev/null 2>&1 || true
 }
 
@@ -98,9 +100,204 @@ query_through_pooler pgbouncer "SHOW DATABASES" \
   | awk -F'|' '{ print $1 "|" $3 "|" $6 }' \
   | sort > "$work_dir/show-databases.txt"
 
+docker run -d --name "$pools_container" --network "$network" \
+  --env "DATABASE_URL=postgres://appuser:s3cret@$postgres_container:5432/appdb" \
+  --env AUTH_TYPE=scram-sha-256 \
+  --env POOL_MODE=transaction \
+  --env LISTEN_ADDR='*' \
+  --env LISTEN_PORT=6432 \
+  --env SERVER_TLS_SSLMODE=disable \
+  --env ADMIN_USERS=appuser \
+  --env DEFAULT_POOL_SIZE=7 \
+  --env POOLS=base,paid,free,capped,forced,orphan \
+  --env POOL_BASE_POOL_SIZE=20 \
+  --env POOL_PAID_POOL_SIZE=34 \
+  --env POOL_FREE_POOL_SIZE=10 \
+  --env POOL_FREE_TIMEZONE=Europe/Paris \
+  --env POOL_FREE_CLIENT_ENCODING=LATIN1 \
+  --env POOL_CAPPED_POOL_SIZE=1 \
+  --env POOL_ORPHAN_USER=readonly \
+  --env USERS=reporting,ghost,mismatched \
+  --env USER_REPORTING_PASSWORD=r3port \
+  --env USER_GHOST_PASSWORD=gh0st \
+  --env USER_MISMATCHED_PASSWORD=the-pooler-one \
+  --env POOL_FORCED_USER=readonly \
+  --env POOL_FORCED_PASSWORD=r3ad0nly \
+  "$image" > /dev/null
+
+deadline=$((SECONDS + 60))
+
+until docker logs "$pools_container" 2>&1 | grep -q "process up:"; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "the pooled pgbouncer never started:"
+    docker logs "$pools_container" 2>&1 | awk '{ print "  " $0 }'
+    exit 1
+  fi
+
+  sleep 1
+done
+
+pools_log=$(docker logs "$pools_container" 2>&1)
+
+# A pool's password reaches the rendered file in the clear. The logs get a mask.
+case "$pools_log" in
+  *r3ad0nly*)
+    echo "the pooler printed a pool's password while echoing its config"
+    exit 1
+    ;;
+esac
+
+case "$pools_log" in
+  *'password=***'*) ;;
+  *)
+    echo "expected the echoed config to carry a masked password, got:"
+    echo "$pools_log" | awk '/^forced =/ { print "  " $0 }'
+    exit 1
+    ;;
+esac
+
+# orphan forces a user whose password is nowhere: a runtime failure, warned of here.
+case "$pools_log" in
+  *'Pool "orphan" reaches the server as "readonly" with no password'*) ;;
+  *)
+    echo "expected a warning for a pool forcing a user it holds no password for"
+    exit 1
+    ;;
+esac
+
+# Every tier must reach the one real database, each through its own pool.
+for pool in base paid free; do
+  pooled_database=$(
+    docker exec --env PGPASSWORD=s3cret "$pools_container" \
+      psql "postgres://appuser@127.0.0.1:6432/$pool" -tAX -c "select current_database()"
+  )
+
+  if [ "$pooled_database" != "appdb" ]; then
+    echo "expected pool $pool to reach appdb, got '$pooled_database'"
+    exit 1
+  fi
+done
+
+docker exec --env PGPASSWORD=s3cret "$pools_container" \
+  psql "postgres://appuser@127.0.0.1:6432/pgbouncer" -tAX -c "SHOW DATABASES" \
+  | awk -F'|' '{ print $1 "|" $3 "|" $6 }' \
+  | sort > "$work_dir/show-databases-pools.txt"
+
+query_pool() {
+  docker exec --env PGPASSWORD=s3cret "$pools_container" \
+    psql "postgres://appuser@127.0.0.1:6432/$1" -tAX -c "$2"
+}
+
+extra_roles_sql="create role reporting login password 'r3port';
+create role readonly login password 'r3ad0nly';
+create role mismatched login password 'the-server-one'"
+
+# A credential named in USERS has to authenticate, not merely reach userlist.txt.
+docker exec --env PGPASSWORD=s3cret "$postgres_container" \
+  psql "postgres://appuser@127.0.0.1:5432/appdb" -tAX -c "$extra_roles_sql" > /dev/null
+
+second_user=$(
+  docker exec --env PGPASSWORD=r3port "$pools_container" \
+    psql "postgres://reporting@127.0.0.1:6432/base" -tAX -c "select current_user"
+)
+
+if [ "$second_user" != "reporting" ]; then
+  echo "expected the USERS credential to authenticate, got '$second_user'"
+  exit 1
+fi
+
+# A setting on a pool has to reach the session, not merely parse. base is the
+# witness: same server, nothing overridden but its size.
+{
+  printf 'base timezone=%s\n' "$(query_pool base "select current_setting('TimeZone')")"
+  printf 'free timezone=%s\n' "$(query_pool free "select current_setting('TimeZone')")"
+  printf 'base client_encoding=%s\n' "$(query_pool base 'show client_encoding')"
+  printf 'free client_encoding=%s\n' "$(query_pool free 'show client_encoding')"
+
+  # A pool given its own user reaches the server as that role, and the pools that
+  # were given none still carry the client's own identity.
+  printf 'base server_user=%s\n' "$(query_pool base 'select current_user')"
+  printf 'forced server_user=%s\n' "$(query_pool forced 'select current_user')"
+} > "$work_dir/pool-effects.txt"
+
+# ghost is in userlist.txt and nowhere in postgres. It can only reach a pool that
+# forces a user, since otherwise pgbouncer connects onward as ghost itself.
+ghost_on_plain=$(
+  docker exec --env PGPASSWORD=gh0st "$pools_container" \
+    psql "postgres://ghost@127.0.0.1:6432/base" -tAX -c "select current_user" 2>&1 \
+    | tail -1 || true # psql is meant to fail here, the message is the assertion
+)
+
+case "$ghost_on_plain" in
+  *'authentication failed for user "ghost"'*) ;;
+  *)
+    echo "expected a credential with no server role to be refused, got '$ghost_on_plain'"
+    exit 1
+    ;;
+esac
+
+ghost_on_forced=$(
+  docker exec --env PGPASSWORD=gh0st "$pools_container" \
+    psql "postgres://ghost@127.0.0.1:6432/forced" -tAX -c "select current_user"
+)
+
+if [ "$ghost_on_forced" != "readonly" ]; then
+  echo "expected the forced pool to carry ghost as readonly, got '$ghost_on_forced'"
+  exit 1
+fi
+
+# mismatched exists on both sides under different passwords. The pooler accepts
+# the one it holds, then presents it onward, and the server refuses it.
+mismatched_login=$(
+  docker exec --env PGPASSWORD=the-pooler-one "$pools_container" \
+    psql "postgres://mismatched@127.0.0.1:6432/base" -tAX -c "select current_user" 2>&1 \
+    | tail -1 || true # psql is meant to fail here, the message is the assertion
+)
+
+case "$mismatched_login" in
+  *'authentication failed for user "mismatched"'*) ;;
+  *)
+    echo "expected a userlist password disagreeing with the server's to be refused,"
+    echo "got '$mismatched_login'"
+    exit 1
+    ;;
+esac
+
+# pool_size has to cap: hold one transaction on a pool of one, and a second
+# client must queue instead of opening a second server connection.
+for _ in 1 2; do
+  docker exec --detach --env PGPASSWORD=s3cret "$pools_container" \
+    psql "postgres://appuser@127.0.0.1:6432/capped" -tAX \
+    -c "begin; select pg_sleep(20); commit;" > /dev/null
+done
+
+deadline=$((SECONDS + 30))
+
+# The recorded line is the very snapshot that satisfied the wait: querying again
+# would read a pool the held transaction may have left in the meantime.
+while : ; do
+  capped_pool=$(query_pool pgbouncer "SHOW POOLS" | awk -F'|' '$1 == "capped"')
+
+  if [ "$(echo "$capped_pool" | awk -F'|' '{ print $4 }')" = "1" ]; then
+    break
+  fi
+
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "no client ever queued on a pool of one, so pool_size did not cap:"
+    echo "$capped_pool" | awk '{ print "  " $0 }'
+    exit 1
+  fi
+
+  sleep 1
+done
+
+echo "$capped_pool" \
+  | awk -F'|' '{ print "capped cl_active=" $3 " cl_waiting=" $4 " sv_active=" $7 }' \
+  >> "$work_dir/pool-effects.txt"
+
 status=0
 
-for artifact in show-config.txt show-databases.txt; do
+for artifact in show-config.txt show-databases.txt show-databases-pools.txt pool-effects.txt; do
   if [ "$update_expected" = "1" ]; then
     mkdir -p "$expected_dir"
     cp "$work_dir/$artifact" "$expected_dir/$artifact"

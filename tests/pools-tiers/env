@@ -1,0 +1,11 @@
+# boot: yes
+# Three pools over one database, differing only by how many connections they get.
+DB_HOST=db.example.com
+DB_PORT=5432
+DB_NAME=appdb
+DB_USER=postgres
+DB_PASSWORD=s3cret
+POOLS=base,paid,free
+POOL_BASE_POOL_SIZE=20
+POOL_PAID_POOL_SIZE=34
+POOL_FREE_POOL_SIZE=10

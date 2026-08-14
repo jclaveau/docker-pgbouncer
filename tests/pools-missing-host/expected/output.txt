@@ -1,0 +1,1 @@
+Pool "paid" has no host, set POOL_PAID_HOST or DB_HOST

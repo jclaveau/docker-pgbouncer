@@ -1,0 +1,6 @@
+# expect: failure
+# Caught before the file exists: rendering this far and failing then would leave
+# a pgbouncer.ini the next start refuses as a config somebody mounted.
+DB_NAME=appdb
+POOLS=base,paid
+POOL_BASE_HOST=b.example.com

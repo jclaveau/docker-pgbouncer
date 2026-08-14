@@ -1,0 +1,10 @@
+# boot: yes
+# A username the database spells with a dot cannot be an env name, so the label
+# addresses it and USER_<LABEL>_NAME carries the real one.
+# The rendered auth_user=postgres is a default, not something configured here:
+# it can only authenticate when a mounted userlist holds that credential.
+DB_HOST=db.example.com
+DB_NAME=appdb
+USERS=metrics
+USER_METRICS_NAME=metrics.exporter
+USER_METRICS_PASSWORD=s3cret

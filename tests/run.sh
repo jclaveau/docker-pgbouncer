@@ -94,6 +94,11 @@ for env_file in "$tests_dir"/*/env; do
   docker run "${docker_args[@]}" "$image" sh -c "$dump_command" \
     > "$work_dir/output.txt" 2>&1 || render_status=$?
 
+  # The shell names the line it failed on, and every edit above that line moves it.
+  awk '{ gsub(/entrypoint\.sh: line [0-9]+:/, "entrypoint.sh: line N:"); print }' \
+    "$work_dir/output.txt" > "$work_dir/normalized.txt"
+  mv "$work_dir/normalized.txt" "$work_dir/output.txt"
+
   if [ "${expectation:-success}" = "failure" ]; then
     if [ "$render_status" -eq 0 ]; then
       echo "  expected a non-zero exit, got 0"

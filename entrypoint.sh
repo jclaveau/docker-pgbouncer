@@ -2,6 +2,7 @@
 # Based on https://raw.githubusercontent.com/brainsam/pgbouncer/master/entrypoint.sh
 
 set -e
+set -f # POOLS and USERS are word-split unquoted, and a name must not reach a glob
 
 # Here are some parameters. See all on
 # https://pgbouncer.github.io/config.html
@@ -9,6 +10,13 @@ set -e
 PG_CONFIG_DIR=/etc/pgbouncer
 PG_CONFIG_FILE="${PG_CONFIG_DIR}/pgbouncer.ini"
 _AUTH_FILE="${AUTH_FILE:-$PG_CONFIG_DIR/userlist.txt}"
+
+# What the environment provided, before any URL overwrites it.
+ENV_DB_USER="${DB_USER:-}"
+ENV_DB_PASSWORD="${DB_PASSWORD:-}"
+ENV_DB_HOST="${DB_HOST:-}"
+ENV_DB_PORT="${DB_PORT:-}"
+ENV_DB_NAME="${DB_NAME:-}"
 
 # Workaround userlist.txt missing issue
 # https://github.com/edoburu/docker-pgbouncer/issues/33
@@ -22,6 +30,13 @@ fi
 #   - The url we should parse
 # Returns (sets variables): DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME
 function parse_url() {
+  # Reset first: DATABASE_URLS parses all its entries in one subshell.
+  DB_USER="${ENV_DB_USER}"
+  DB_PASSWORD="${ENV_DB_PASSWORD}"
+  DB_HOST="${ENV_DB_HOST}"
+  DB_PORT="${ENV_DB_PORT}"
+  DB_NAME="${ENV_DB_NAME}"
+
   # Thanks to https://stackoverflow.com/a/17287984/146289
 
   # Allow to pass values like dj-database-url / django-environ accept
@@ -53,7 +68,9 @@ function parse_url() {
 # Grabs variables set by `parse_url` and adds them to the userlist if not already set in there.
 function generate_userlist_if_needed() {
   if [ -n "${DB_USER}" -a -n "${DB_PASSWORD}" -a -e "${_AUTH_FILE}" ] && ! grep -q "^\"${DB_USER}\"" "${_AUTH_FILE}"; then
-    if [ "${AUTH_TYPE}" == "plain" ] || [ "${AUTH_TYPE}" == "scram-sha-256" ]; then
+    if echo "${DB_PASSWORD}" | grep -qE '^(md5[0-9a-f]{32}|SCRAM-SHA-256\$)'; then
+      pass="${DB_PASSWORD}" # already a verifier, hashing it again would break login
+    elif [ "${AUTH_TYPE}" == "plain" ] || [ "${AUTH_TYPE}" == "scram-sha-256" ]; then
       pass="${DB_PASSWORD}"
     else
       pass="md5$(echo -n "${DB_PASSWORD}${DB_USER}" | md5sum | cut -f 1 -d ' ')"
@@ -65,14 +82,291 @@ function generate_userlist_if_needed() {
 
 # Grabs variables set by `parse_url` and adds them to the PG config file as a database entry.
 function generate_config_db_entry() {
+  # auth_user falls back to postgres even when nothing here holds its password:
+  # a mounted userlist may, and dropping it takes auth_query from those setups.
   printf "\
 ${DB_NAME:-*} = host=${DB_HOST:?"Setup pgbouncer config error! You must set DB_HOST env"} \
-port=${DB_PORT:-5432} auth_user=${DB_USER:-postgres}\
+port=${DB_PORT:-5432} auth_user=${DB_USER:-${AUTH_USER:-postgres}}\
 ${CLIENT_ENCODING:+ client_encoding=${CLIENT_ENCODING}}\
 ${TIMEZONE:+ timezone=${TIMEZONE}}\
 ${POOL_SIZE:+ pool_size=${POOL_SIZE}}
 " >> "${PG_CONFIG_FILE}"
 }
+
+# The env prefix a name's settings live under, e.g. POOL + paid -> POOL_PAID_
+function name_env_prefix() {
+  printf "%s_%s_" "$1" "$(echo "$2" | tr 'a-z' 'A-Z')"
+}
+
+# One setting, empty when it is not set.
+function env_setting() {
+  env | awk -F= -v key="$1$2" '$1 == key { print substr($0, length(key) + 2); exit }'
+}
+
+# The connect string of a pool: the inherited defaults, then its own overrides,
+# the last value of a key winning. pgbouncer refuses a parameter it knows not.
+function pool_connect_string() {
+  pool_prefix="$1"
+  pool_name="$2"
+
+  {
+    printf 'host=%s\n' "${DB_HOST}"
+    printf 'port=%s\n' "${DB_PORT:-5432}"
+    printf 'dbname=%s\n' "${DB_NAME:-$pool_name}"
+    # AUTH_USER names the lookup role when the connection's own user does not.
+    printf 'auth_user=%s\n' "${DB_USER:-${AUTH_USER:-postgres}}"
+
+    # pgbouncer has no process-wide setting for these three.
+    if [ -n "${CLIENT_ENCODING}" ]; then
+      printf 'client_encoding=%s\n' "${CLIENT_ENCODING}"
+    fi
+
+    if [ -n "${TIMEZONE}" ]; then
+      printf 'timezone=%s\n' "${TIMEZONE}"
+    fi
+
+    if [ -n "${POOL_SIZE}" ]; then
+      printf 'pool_size=%s\n' "${POOL_SIZE}"
+    fi
+
+    env | awk -F= -v prefix="$pool_prefix" '
+      index($0, prefix) == 1 {
+        print tolower(substr($1, length(prefix) + 1)) "=" substr($0, length($1) + 2)
+      }'
+  } \
+    | awk -F= '{ key = $1; value = substr($0, length(key) + 2); last[key] = value }
+               END { for (key in last) print key "=" last[key] }' \
+    | sort \
+    | awk -F= '
+        {
+          key = $1
+          value = substr($0, length(key) + 2)
+
+          # A value with a space needs quoting, and a quote inside it doubling.
+          if (value ~ /[[:space:]]/) {
+            gsub(/'"'"'/, "'"'"''"'"'", value)
+            value = "'"'"'" value "'"'"'"
+          }
+
+          printf " %s=%s", key, value
+        }'
+}
+
+# A name reaching its settings through an env prefix cannot contain anything an
+# env name cannot, nor be the prefix of another name.
+function assert_names_are_usable() {
+  env_root="$1"
+  kind="$2"
+  names="$3"
+  seen_names=""
+
+  for name in $(echo "$names" | tr , ' '); do
+    if ! echo "$name" | grep -qE '^[A-Za-z0-9_]+$'; then
+      echo "$kind name \"$name\" is not usable: ${env_root}S takes letters, digits and underscores" >&2
+      exit 1
+    fi
+
+    case " ${seen_names} " in
+      *" $name "*)
+        echo "$kind name \"$name\" appears twice in ${env_root}S" >&2
+        exit 1
+        ;;
+    esac
+
+    seen_names="${seen_names} $name"
+
+    for other in $(echo "$names" | tr , ' '); do
+      if [ "$name" = "$other" ]; then
+        continue
+      fi
+
+      case "$(name_env_prefix "$env_root" "$other")" in
+        "$(name_env_prefix "$env_root" "$name")"*)
+          echo "$kind names \"$name\" and \"$other\" overlap: the settings of one would be read as the other's" >&2
+          exit 1
+          ;;
+      esac
+    done
+  done
+}
+
+# A setting addresses a name the list holds and carries a value; empty means a
+# reference that resolved to nothing, never an instruction to blank an inherited one.
+function assert_settings_are_usable() {
+  env_root="$1"
+  names="$2"
+  hint="$3"
+  exempt=" $4 " # POOL_MODE configures the process, POOL_SIZE every entry's default
+
+  prefixes=""
+
+  for name in $(echo "$names" | tr , ' '); do
+    prefixes="${prefixes} $(name_env_prefix "$env_root" "$name")"
+  done
+
+  problems="$(env | awk -F= -v root="${env_root}_" -v list="${env_root}S" \
+    -v prefixes="$prefixes" -v exempt="$exempt" -v hint="$hint" '
+      index($1, root) != 1 || index(exempt, " " $1 " ") > 0 { next }
+
+      {
+        count = split(prefixes, known, " ")
+        prefix = ""
+
+        for (i = 1; i <= count; i++) {
+          if (index($1, known[i]) == 1) {
+            prefix = known[i]
+          }
+        }
+
+        if (prefix == "") {
+          print $1 " is not a setting of any name in " list
+        }
+        else if ($1 == prefix) {
+          print $1 " names no setting"
+        }
+        else if (substr($0, length($1) + 2) == "") {
+          print $1 " is empty, " hint
+        }
+      }' | sort)" # a stable order to report them in, which env has not
+
+  if [ -n "$problems" ]; then
+    echo "$problems" >&2
+    exit 1
+  fi
+}
+
+# Refused here rather than while rendering: a failure mid-render leaves a
+# half-written pgbouncer.ini, which the next start refuses as a mounted config.
+function assert_pools_are_usable() {
+  for name in $(echo "${POOLS}" | tr , ' '); do
+    prefix="$(name_env_prefix POOL "$name")"
+    pool_user="$(env_setting "$prefix" USER)"
+    pool_password="$(env_setting "$prefix" PASSWORD)"
+
+    if [ -z "$(env_setting "$prefix" HOST)${DB_HOST}" ]; then
+      echo "Pool \"$name\" has no host, set ${prefix}HOST or DB_HOST" >&2
+      exit 1
+    fi
+
+    # pgbouncer drops a database line's password when no user carries it.
+    if [ -z "$pool_user" ] && [ -n "$pool_password" ]; then
+      echo "Pool \"$name\" carries ${prefix}PASSWORD with no user to present it as: set ${prefix}USER or unset it" >&2
+      exit 1
+    fi
+
+    # Only a warning: a mounted userlist may hold that role's password.
+    if [ -n "$pool_user" ] && [ -z "$pool_password" ]; then
+      echo "Pool \"$name\" reaches the server as \"$pool_user\" with no password: set ${prefix}PASSWORD or list the role in ${_AUTH_FILE}" >&2
+    fi
+  done
+}
+
+# A pool needs no allowlist, pgbouncer refusing the parameters it knows not.
+# These two are read here and nowhere else, so a third would go nowhere quietly.
+function assert_user_settings_are_known() {
+  accepted=""
+
+  for name in $(echo "${USERS}" | tr , ' '); do
+    prefix="$(name_env_prefix USER "$name")"
+    accepted="${accepted} ${prefix}NAME ${prefix}PASSWORD"
+  done
+
+  problems="$(env | awk -F= -v accepted=" ${accepted} " '
+    index($1, "USER_") != 1 || index(accepted, " " $1 " ") > 0 { next }
+    { print $1 " is not a setting of a USERS name: only NAME and PASSWORD are read" }' \
+    | sort)"
+
+  if [ -n "$problems" ]; then
+    echo "$problems" >&2
+    exit 1
+  fi
+}
+
+# One userlist entry per USERS name, the label standing in for the username when
+# the database spells it in a way an env name cannot.
+function generate_userlist_from_users() {
+  # The writer reads the globals, so put back what the connection settings say
+  # once the last credential is written.
+  connection_user="${DB_USER}"
+  connection_password="${DB_PASSWORD}"
+
+  for name in $(echo "${USERS}" | tr , ' '); do
+    prefix="$(name_env_prefix USER "$name")"
+    DB_USER="$(env_setting "$prefix" NAME)"
+    DB_USER="${DB_USER:-$name}"
+    DB_PASSWORD="$(env_setting "$prefix" PASSWORD)"
+
+    generate_userlist_if_needed
+  done
+
+  DB_USER="${connection_user}"
+  DB_PASSWORD="${connection_password}"
+}
+
+# One [databases] entry per pool, each inheriting what it does not override.
+function generate_pool_entries() {
+  for name in $(echo "${POOLS}" | tr , ' '); do
+    prefix="$(name_env_prefix POOL "$name")"
+
+    printf "%s =%s\n" "$name" "$(pool_connect_string "$prefix" "$name")" \
+      >> "${PG_CONFIG_FILE}"
+  done
+}
+
+# DATABASE_URLS spells topology and credentials in one value; POOLS and USERS
+# split them, and mixing the two spellings has no single reading.
+if [ -n "${DATABASE_URLS}" ] && [ -n "${POOLS}${USERS}" ]; then
+  echo "DATABASE_URLS cannot be combined with POOLS or USERS: name the entries in POOLS and the credentials in USERS" >&2
+  exit 1
+fi
+
+# Parsed before the checks below, which read the host and user it carries.
+if [ -n "${DATABASE_URL}" ]; then
+  parse_url "${DATABASE_URL}"
+fi
+
+# An existing config is served as it stands, so these pools would reach nothing.
+if [ -n "${POOLS}" ] && [ -f "${PG_CONFIG_FILE}" ]; then
+  echo "POOLS cannot be used with an existing ${PG_CONFIG_FILE}: that file is served as it stands, so no pool would be rendered into it" >&2
+  exit 1
+fi
+
+# pgbouncer keeps this name for its admin console and refuses a database using it.
+case ",${POOLS}," in
+  *,pgbouncer,*)
+    echo "Pool name \"pgbouncer\" is reserved for pgbouncer's own admin console" >&2
+    exit 1
+    ;;
+esac
+
+assert_names_are_usable POOL Pool "${POOLS}"
+assert_settings_are_usable POOL "${POOLS}" "unset it to inherit" "POOL_MODE POOL_SIZE"
+assert_pools_are_usable
+
+assert_names_are_usable USER User "${USERS}"
+assert_settings_are_usable USER "${USERS}" "give it a value or drop the name from USERS" ""
+assert_user_settings_are_known
+
+# Every credential is checked before one is written: a userlist left half filled
+# by a refused startup outlives it, and the writer skips names already in there.
+for name in $(echo "${USERS}" | tr , ' '); do
+  user_prefix="$(name_env_prefix USER "$name")"
+
+  if [ -z "$(env_setting "$user_prefix" PASSWORD)" ]; then
+    echo "User \"$name\" has no password, set ${user_prefix}PASSWORD" >&2
+    exit 1
+  fi
+
+  user_name="$(env_setting "$user_prefix" NAME)"
+  user_name="${user_name:-$name}"
+
+  # The connection's own credential is written first, and the writer skips a
+  # name already in the file, so this one would be dropped without a word.
+  if [ -n "${DB_PASSWORD}" ] && [ "$user_name" = "${DB_USER}" ]; then
+    echo "User \"$user_name\" is already written from DB_USER and DB_PASSWORD: ${user_prefix}PASSWORD would be dropped, so drop \"$name\" from USERS" >&2
+    exit 1
+  fi
+done
 
 # Write the password with MD5 encryption, to avoid printing it during startup.
 # Notice that `docker inspect` will show unencrypted env variables.
@@ -82,10 +376,11 @@ if [ -n "${DATABASE_URLS}" ]; then
     generate_userlist_if_needed
   done
 else
-  if [ -n "${DATABASE_URL}" ]; then
-    parse_url "${DATABASE_URL}"
-  fi
   generate_userlist_if_needed
+fi
+
+if [ -n "${USERS}" ]; then
+  generate_userlist_from_users
 fi
 
 if [ ! -f "${PG_CONFIG_FILE}" ]; then
@@ -99,15 +394,14 @@ if [ ! -f "${PG_CONFIG_FILE}" ]; then
 [databases]
 " > "${PG_CONFIG_FILE}"
 
-  if [ -n "$DATABASE_URLS" ]; then
+  if [ -n "$POOLS" ]; then
+    generate_pool_entries
+  elif [ -n "$DATABASE_URLS" ]; then
     echo "$DATABASE_URLS" | tr , '\n' | while read url; do
       parse_url "$url"
       generate_config_db_entry
     done
   else
-    if [ -n "$DATABASE_URL" ]; then
-      parse_url "$DATABASE_URL"
-    fi
     generate_config_db_entry
   fi
 
@@ -196,7 +490,19 @@ ${TCP_KEEPINTVL:+tcp_keepintvl = ${TCP_KEEPINTVL}\n}\
 ${TCP_USER_TIMEOUT:+tcp_user_timeout = ${TCP_USER_TIMEOUT}\n}\
 ################## end file ##################
 " >> "${PG_CONFIG_FILE}"
-  cat "${PG_CONFIG_FILE}"
+
+  # A pool's password has to reach the file in the clear, and the logs never.
+  awk '
+    BEGIN {
+      quote = sprintf("%c", 39)
+      quoted = "password=" quote "((" quote quote ")|([^" quote "]))*" quote
+    }
+
+    {
+      gsub(quoted, "password=***")
+      gsub(/password=[^ ]+/, "password=***")
+      print
+    }' "${PG_CONFIG_FILE}"
 fi
 
 echo "Starting $*..."

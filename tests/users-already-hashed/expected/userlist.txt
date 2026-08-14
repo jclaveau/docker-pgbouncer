@@ -1,0 +1,2 @@
+"app" "SCRAM-SHA-256$4096:c2FsdA==$c3RvcmVk:c2VydmVy"
+"legacy" "md5d41d8cd98f00b204e9800998ecf8427e"

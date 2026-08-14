@@ -1,0 +1,7 @@
+# boot: yes
+# AUTH_USER is the documented way to have pgbouncer look passwords up on the
+# server, and the entry asked as postgres regardless until it was read here.
+DB_HOST=db.example.com
+DB_NAME=appdb
+AUTH_USER=lookup
+AUTH_QUERY=SELECT usename, passwd FROM pg_shadow WHERE usename=$1

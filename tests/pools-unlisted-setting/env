@@ -1,0 +1,8 @@
+# expect: failure
+# Neither reaches a pool: one misspells the name, the other names no setting of
+# it. Ignoring them silently is how a tier ends up on the wrong pool size.
+DB_HOST=db.example.com
+DB_NAME=appdb
+POOLS=base
+POOL_BASE=20
+POOL_BSAE_POOL_SIZE=34

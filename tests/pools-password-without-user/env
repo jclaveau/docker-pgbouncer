@@ -1,0 +1,7 @@
+# expect: failure
+# pgbouncer builds a forced credential only where a user carries it, so this one
+# would sit in the file in the clear and authenticate nothing.
+DB_HOST=db.example.com
+DB_NAME=appdb
+POOLS=base,forced
+POOL_FORCED_PASSWORD=v13wer

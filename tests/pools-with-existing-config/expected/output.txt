@@ -1,0 +1,1 @@
+POOLS cannot be used with an existing /etc/pgbouncer/pgbouncer.ini: that file is served as it stands, so no pool would be rendered into it

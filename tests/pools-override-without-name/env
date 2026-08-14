@@ -1,0 +1,7 @@
+# expect: failure
+# Left alone this reaches the line as a bare "=34", which pgbouncer reports as a
+# syntax error naming the pool rather than the variable at fault.
+DB_HOST=db.example.com
+DB_NAME=appdb
+POOLS=base
+POOL_BASE_=34

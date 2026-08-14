@@ -1,0 +1,1 @@
+Pool name "paid-tier" is not usable: POOLS takes letters, digits and underscores

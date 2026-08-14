@@ -1,0 +1,1 @@
+USER_APP_PASSWORD is empty, give it a value or drop the name from USERS

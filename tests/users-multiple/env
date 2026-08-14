@@ -1,0 +1,8 @@
+# boot: yes
+# The rendered auth_user=postgres is a default, not something configured here:
+# it can only authenticate when a mounted userlist holds that credential.
+DB_HOST=db.example.com
+DB_NAME=appdb
+USERS=app,reporting
+USER_APP_PASSWORD=s3cret
+USER_REPORTING_PASSWORD=r3port

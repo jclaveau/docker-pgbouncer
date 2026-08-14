@@ -1,0 +1,11 @@
+# boot: yes
+# The global reaches every pool; one of them reports another timezone.
+# The rendered auth_user=postgres is a default, not something configured here:
+# it can only authenticate when a mounted userlist holds that credential.
+DB_HOST=db.example.com
+DB_NAME=appdb
+TIMEZONE=UTC
+POOLS=base,free
+POOL_BASE_POOL_SIZE=20
+POOL_FREE_POOL_SIZE=10
+POOL_FREE_TIMEZONE=Europe/Paris

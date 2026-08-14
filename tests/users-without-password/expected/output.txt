@@ -1,0 +1,1 @@
+User "reporting" has no password, set USER_REPORTING_PASSWORD

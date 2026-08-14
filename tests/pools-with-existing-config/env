@@ -1,0 +1,7 @@
+# expect: failure
+# A mounted config is served as it stands, so these pools would be rendered
+# nowhere and the pooler would answer with entries nobody asked for.
+DB_HOST=db.example.com
+DB_NAME=appdb
+POOLS=base,paid
+POOL_PAID_POOL_SIZE=34

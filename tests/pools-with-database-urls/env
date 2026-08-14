@@ -1,0 +1,8 @@
+# expect: failure
+# DATABASE_URLS spells topology and credentials at once; POOLS and USERS split
+# them, so the two spellings have no single reading.
+DATABASE_URLS=postgres://appuser:s3cret@db1.example.com:5432/first,postgres://otheruser:0ther@db2.example.com:5432/second
+DB_HOST=db.example.com
+DB_NAME=appdb
+POOLS=base,paid
+POOL_PAID_POOL_SIZE=34
