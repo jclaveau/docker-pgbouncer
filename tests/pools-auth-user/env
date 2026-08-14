@@ -1,0 +1,7 @@
+# boot: yes
+# Pools inherit that same fallback, and one naming its own lookup role keeps it.
+DB_HOST=db.example.com
+DB_NAME=appdb
+AUTH_USER=lookup
+POOLS=base,audit
+POOL_AUDIT_AUTH_USER=auditor

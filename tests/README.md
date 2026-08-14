@@ -71,6 +71,9 @@ tests/live.sh
   says nothing. `POOL_MODE` and `POOL_SIZE` are exempt: they configure the process.
 - A pool's settings are sorted before they reach the line — `env` order is not
   stable enough to compare against a file.
+- `auth_user` follows `DB_USER`, then `AUTH_USER`, then `postgres`, for entries and
+  pools alike. `auth-user-beside-db-user` is the witness that must not move: it sets
+  both, so it renders the same before and after that fallback existed.
 - An empty override is refused by the entrypoint rather than passed on, because
   pgbouncer's own reaction to one depends on where it lands:
 

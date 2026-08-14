@@ -85,7 +85,7 @@ function generate_config_db_entry() {
   # a mounted userlist may, and dropping it takes auth_query from those setups.
   printf "\
 ${DB_NAME:-*} = host=${DB_HOST:?"Setup pgbouncer config error! You must set DB_HOST env"} \
-port=${DB_PORT:-5432} auth_user=${DB_USER:-postgres}\
+port=${DB_PORT:-5432} auth_user=${DB_USER:-${AUTH_USER:-postgres}}\
 ${CLIENT_ENCODING:+ client_encoding=${CLIENT_ENCODING}}\
 ${TIMEZONE:+ timezone=${TIMEZONE}}\
 ${POOL_SIZE:+ pool_size=${POOL_SIZE}}
@@ -112,7 +112,8 @@ function pool_connect_string() {
     printf 'host=%s\n' "${DB_HOST}"
     printf 'port=%s\n' "${DB_PORT:-5432}"
     printf 'dbname=%s\n' "${DB_NAME:-$pool_name}"
-    printf 'auth_user=%s\n' "${DB_USER:-postgres}" # a mounted userlist may hold it
+    # AUTH_USER names the lookup role when the connection's own user does not.
+    printf 'auth_user=%s\n' "${DB_USER:-${AUTH_USER:-postgres}}"
 
     # pgbouncer has no process-wide setting for these three.
     if [ -n "${CLIENT_ENCODING}" ]; then

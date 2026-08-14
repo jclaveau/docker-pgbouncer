@@ -1,0 +1,8 @@
+# boot: yes
+# DB_USER wins: it is the credential this container holds, where AUTH_USER only
+# names who may look the others up. all-knobs pins the same pair.
+DB_HOST=db.example.com
+DB_NAME=appdb
+DB_USER=appuser
+DB_PASSWORD=s3cret
+AUTH_USER=lookup
