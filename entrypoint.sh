@@ -9,6 +9,10 @@ set -f # POOLS and USERS are word-split unquoted, and a name must not reach a gl
 
 PG_CONFIG_DIR=/etc/pgbouncer
 PG_CONFIG_FILE="${PG_CONFIG_DIR}/pgbouncer.ini"
+# Written as the first line of a config this entrypoint renders. A container
+# restart re-runs the entrypoint over the filesystem the previous run wrote, and
+# without this the entrypoint reads its own output as a file the operator mounted.
+PG_CONFIG_MARKER="# rendered by docker-pgbouncer, regenerated on every start"
 _AUTH_FILE="${AUTH_FILE:-$PG_CONFIG_DIR/userlist.txt}"
 
 # What the environment provided, before any URL overwrites it.
@@ -313,6 +317,13 @@ function generate_pool_entries() {
   done
 }
 
+# Only a file carrying the marker is ours to overwrite; anything else is the
+# operator's and is served exactly as it stands.
+function config_is_ours() {
+  [ -f "${PG_CONFIG_FILE}" ] &&
+    head -n 1 "${PG_CONFIG_FILE}" | grep -qF "${PG_CONFIG_MARKER}"
+}
+
 # DATABASE_URLS spells topology and credentials in one value; POOLS and USERS
 # split them, and mixing the two spellings has no single reading.
 if [ -n "${DATABASE_URLS}" ] && [ -n "${POOLS}${USERS}" ]; then
@@ -326,8 +337,8 @@ if [ -n "${DATABASE_URL}" ]; then
 fi
 
 # An existing config is served as it stands, so these pools would reach nothing.
-if [ -n "${POOLS}" ] && [ -f "${PG_CONFIG_FILE}" ]; then
-  echo "POOLS cannot be used with an existing ${PG_CONFIG_FILE}: that file is served as it stands, so no pool would be rendered into it" >&2
+if [ -n "${POOLS}" ] && [ -f "${PG_CONFIG_FILE}" ] && ! config_is_ours; then
+  echo "POOLS cannot be used with the ${PG_CONFIG_FILE} you provided: that file is served as it stands, so no pool would be rendered into it" >&2
   exit 1
 fi
 
@@ -383,13 +394,14 @@ if [ -n "${USERS}" ]; then
   generate_userlist_from_users
 fi
 
-if [ ! -f "${PG_CONFIG_FILE}" ]; then
+if [ ! -f "${PG_CONFIG_FILE}" ] || config_is_ours; then
   echo "Creating pgbouncer config in ${PG_CONFIG_DIR}"
 
   # Config file is in "ini" format. Section names are between "[" and "]".
   # Lines starting with ";" or "#" are taken as comments and ignored.
   # The characters ";" and "#" are not recognized when they appear later in the line.
   printf "\
+${PG_CONFIG_MARKER}
 ################## Auto generated ##################
 [databases]
 " > "${PG_CONFIG_FILE}"
